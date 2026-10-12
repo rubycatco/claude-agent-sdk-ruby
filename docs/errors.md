@@ -87,6 +87,32 @@ initial handshake that was still in flight when the CLI exited. Match on
 `Resume rejected by --resume-drops-turn:` in the message and treat it as
 deterministic: clear the fork target and resume plainly rather than retrying.
 
+## Authentication Failures
+
+The SDK holds no credentials; the CLI authenticates itself (see the README's
+[Authentication](../README.md#authentication)). Neither of the two ways that
+can fail is reported when the session starts.
+
+**No credentials at all** (a fresh container, a CI runner). The first prompt
+comes back as an `AssistantMessage` whose `error` is `'authentication_failed'`
+(its text is "Not logged in · Please run /login", a command an SDK host cannot
+run), followed by a `ResultMessage` with `is_error` set. `query()` and `ask`
+then raise `ResultError` with `terminal_reason == 'api_error'`. A `Client`
+session stays open, so check the result's `is_error` there.
+
+**A key or token the API rejects.** It ends the same way, with
+`api_error_status` 401, but only after the CLI has retried: ten
+`APIRetryMessage`s over about three minutes when tested. Watch for them rather
+than waiting for the error:
+
+```ruby
+ClaudeAgentSDK.query(prompt: "Hello") do |message|
+  next unless message.is_a?(ClaudeAgentSDK::APIRetryMessage)
+
+  warn "API retry #{message.attempt}/#{message.max_retries}: HTTP #{message.error_status} (#{message.error})"
+end
+```
+
 ## Errors from Client Control Methods
 
 `Client#interrupt`, `#set_model`, `#set_permission_mode`, `#rewind_files`, `#reconnect_mcp_server`, `#toggle_mcp_server`, `#stop_task` and the other control methods (the Ruby-style `model=` and `permission_mode=` included) send a request to the CLI and wait for its answer. They can fail in three ways:

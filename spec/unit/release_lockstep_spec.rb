@@ -58,4 +58,18 @@ RSpec.describe 'release lockstep' do
 
     expect(readme.scan(/\b2\.1\.\d+\b/)).to eq([])
   end
+
+  # The number of hook events is written in the README, the docs, the plugin
+  # manifest and both copies of the skill, and HOOK_EVENTS grows with the CLI.
+  it 'states the number of hook events as HOOK_EVENTS has it, wherever it is written' do
+    files = ['README.md', 'plugins/claude-agent-ruby/.claude-plugin/plugin.json'] +
+            Dir.glob(['docs/*.md', 'skills/**/*.md', 'plugins/**/*.md'], base: root)
+    stated = /\b(\d+) (?:hook|lifecycle) events\b|\bhooks? \((?:all )?(\d+) events\)|\bhook with all (\d+) events\b/i
+    counts = files.flat_map do |file|
+      File.read(File.join(root, file)).scan(stated).flatten.compact.map { |count| [file, count.to_i] }
+    end
+
+    expect(counts.map(&:first)).to include('README.md', 'docs/hooks-and-permissions.md', 'skills/SKILL.md')
+    expect(counts.reject { |_file, count| count == ClaudeAgentSDK::HOOK_EVENTS.size }).to eq([])
+  end
 end

@@ -8,11 +8,9 @@
 [![Docs](https://img.shields.io/badge/docs-rubydoc.info-blue)](https://rubydoc.info/gems/claude-agent-sdk)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/LICENSE)
 
-A Ruby SDK for the [Claude Code](https://docs.claude.com/en/docs/claude-code-overview) agent runtime, built for running agents in production Ruby and Rails apps. It has the same capabilities as the official [TypeScript](https://github.com/anthropics/claude-agent-sdk-typescript) and [Python](https://github.com/anthropics/claude-agent-sdk-python) SDKs, plus what a Rails deploy needs around them: a generator and CLI-vendoring rake task, callbacks that are safe to touch ActiveRecord from, a pinned CLI binary, built-in OpenTelemetry tracing, and transcript mirroring to your own storage.
+A Ruby SDK for the [Claude Code](https://code.claude.com/docs/en/overview) agent runtime, built for running agents in production Ruby and Rails apps. It has the same capabilities as the official [TypeScript](https://github.com/anthropics/claude-agent-sdk-typescript) and [Python](https://github.com/anthropics/claude-agent-sdk-python) SDKs, plus what a Rails deploy needs around them: a generator and CLI-vendoring rake task, callbacks that are safe to touch ActiveRecord from, a pinned CLI binary, built-in OpenTelemetry tracing, and transcript mirroring to your own storage.
 
 > **Unofficial and community-maintained.** This project is not affiliated with or supported by Anthropic. It tracks the official SDKs release by release; see the [CHANGELOG](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/CHANGELOG.md) for the currently synced version.
-
-> **Upgrading from 0.x?** 1.0 raises on unknown keys, limits `#[]` to attributes and adds `SessionStoreError`. [UPGRADING-1.0.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/UPGRADING-1.0.md) has the checklist.
 
 ## Highlights
 
@@ -36,6 +34,8 @@ gem 'claude-agent-sdk', '~> 1.0'
 
 Then `bundle install`, or install directly with `gem install claude-agent-sdk`. To track unreleased changes, point the Gemfile at GitHub: `gem 'claude-agent-sdk', github: 'rubycatco/claude-agent-sdk-ruby'`.
 
+> **Upgrading from 0.x?** 1.0 raises on unknown keys, limits `#[]` to attributes and adds `SessionStoreError`. [UPGRADING-1.0.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/UPGRADING-1.0.md) has the checklist.
+
 **Prerequisites**
 
 - Ruby 3.2 or newer
@@ -57,31 +57,7 @@ The SDK holds no credentials of its own. The `claude` process it starts authenti
 - `CLAUDE_CODE_OAUTH_TOKEN`, a long-lived token for a Claude subscription (`claude setup-token` creates one), set the same way
 - a login the CLI has already stored for the user your process runs as (`claude auth login`)
 
-A machine with none of them, such as a fresh container or a CI runner, does not fail at startup. The first prompt comes back as an `AssistantMessage` whose `error` is `'authentication_failed'` (its text is "Not logged in · Please run /login", a command an SDK host cannot run), followed by a `ResultMessage` with `is_error` set. `query()` and `ask` then raise `ResultError` with `terminal_reason == 'api_error'`; a `Client` session stays open, so check the result's `is_error` there. A key or token the API rejects ends the same way, with `api_error_status` 401, but only after the CLI has retried: watch for `APIRetryMessage` (ten of them over about three minutes when tested) rather than waiting for the error. [docs/errors.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/errors.md) shows how to handle both.
-
-### Rails in a minute
-
-```bash
-bundle add claude-agent-sdk
-bin/rails generate claude_agent_sdk:install   # config/initializers/claude_agent_sdk.rb + .gitignore entry
-bin/rails claude_agent_sdk:install_cli        # the tested CLI into vendor/claude (also a Docker build step)
-```
-
-```ruby
-# app/jobs/summarize_ticket_job.rb
-class SummarizeTicketJob < ApplicationJob
-  def perform(ticket)
-    options = ClaudeAgentSDK::ClaudeAgentOptions.new(tools: [], max_turns: 1)
-    prompt = "Summarize this support ticket in two sentences:\n\n#{ticket.body}"
-
-    ClaudeAgentSDK.query(prompt: prompt, options: options) do |message|
-      ticket.update!(summary: message.result) if message.is_a?(ClaudeAgentSDK::ResultMessage)
-    end
-  end
-end
-```
-
-The block runs on a plain thread, so ActiveRecord calls inside it just work. [docs/rails.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/rails.md) continues with multi-turn sessions, ActionCable streaming, and fiber workers.
+A machine with none of them, such as a fresh container or a CI runner, does not fail at startup: the first prompt fails instead, as a `ResultError` from `query()` and `ask` and as a `ResultMessage` with `is_error` set on a `Client`. [Authentication Failures](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/errors.md#authentication-failures) describes what arrives, for missing credentials and for a rejected key.
 
 ## Quick Start
 
@@ -176,6 +152,8 @@ options = ClaudeAgentSDK::ClaudeAgentOptions.new(
   mcp_servers: { tools: server },
   allowed_tools: ['mcp__tools__greet']
 )
+
+puts ClaudeAgentSDK.ask('Greet Alice with the greet tool', options: options).result
 ```
 
 A String return is sent to Claude as a single text block. Return a Hash instead (`{ content: [...], is_error: true }`) to flag an error, attach `structured_content:`, or send several content blocks or images. Arguments are validated against the tool's JSON Schema before your handler runs, and handler exceptions are reported back to the model in-band so it can self-correct. See [docs/mcp-servers.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/mcp-servers.md) for resources, prompts, mixed SDK + external servers, and schema details.
@@ -185,13 +163,57 @@ A String return is sent to Claude as a single text block. Return a Hash instead 
 Hooks run your Ruby code at any of the 33 lifecycle events (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `PreCompact`, …) with typed inputs. Permission callbacks decide programmatically whether a tool call may proceed.
 
 ```ruby
+# A PreToolUse hook: refuse any Bash command that contains `rm -rf`.
+block_rm_rf = lambda do |input, _tool_use_id, _context|
+  next {} unless input.tool_input[:command].to_s.include?('rm -rf')
+
+  { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
+                          permissionDecisionReason: 'rm -rf is not allowed' } }
+end
+
+# A permission callback: asked before a tool call that no rule already allows.
+protect_env_files = lambda do |tool_name, input, _context|
+  if tool_name == 'Write' && input[:file_path].to_s.end_with?('.env')
+    ClaudeAgentSDK::PermissionResultDeny.new(message: '.env files are off limits')
+  else
+    ClaudeAgentSDK::PermissionResultAllow.new
+  end
+end
+
 options = ClaudeAgentSDK::ClaudeAgentOptions.new(
-  hooks: { 'PreToolUse' => [ClaudeAgentSDK::HookMatcher.new(matcher: 'Bash', hooks: [my_hook])] },
-  can_use_tool: my_permission_callback
+  hooks: { 'PreToolUse' => [ClaudeAgentSDK::HookMatcher.new(matcher: 'Bash', hooks: [block_rm_rf])] },
+  can_use_tool: protect_env_files
 )
 ```
 
 See [docs/hooks-and-permissions.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/hooks-and-permissions.md) for the full event list and worked examples.
+
+## Rails in a minute
+
+```bash
+bundle add claude-agent-sdk
+bin/rails generate claude_agent_sdk:install   # config/initializers/claude_agent_sdk.rb + .gitignore entry
+bin/rails claude_agent_sdk:install_cli        # the tested CLI into vendor/claude (also a Docker build step)
+```
+
+```ruby
+# app/jobs/summarize_ticket_job.rb
+class SummarizeTicketJob < ApplicationJob
+  def perform(ticket)
+    options = ClaudeAgentSDK::ClaudeAgentOptions.new(
+      tools: [], max_turns: 1,                            # text only, no built-in tools
+      env: { 'CLAUDE_CODE_DISABLE_AUTO_MEMORY' => '1' }   # keeps one user's "remember…" out of the next user's session
+    )
+    prompt = "Summarize this support ticket in two sentences:\n\n#{ticket.body}"
+
+    ClaudeAgentSDK.query(prompt: prompt, options: options) do |message|
+      ticket.update!(summary: message.result) if message.is_a?(ClaudeAgentSDK::ResultMessage)
+    end
+  end
+end
+```
+
+The block runs on a plain thread, so ActiveRecord calls inside it are safe. It is a thread of its own, though: the job's `Current` attributes, time zone, log tags and database role or shard are not set there (see [Request state does not follow into callbacks](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/rails.md#request-state-does-not-follow-into-callbacks)). [docs/rails.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/rails.md) continues with multi-turn sessions, ActionCable streaming, per-user isolation, and fiber workers.
 
 ## Documentation
 
@@ -210,7 +232,7 @@ See [docs/hooks-and-permissions.md](https://github.com/rubycatco/claude-agent-sd
 | Hash-key rule, attribute access, and the message, content block, and configuration type reference | [docs/types.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/types.md) |
 | Error handling, exception hierarchy, timeouts | [docs/errors.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/errors.md) |
 
-API reference: [rubydoc.info/gems/claude-agent-sdk](https://rubydoc.info/gems/claude-agent-sdk). Available built-in tools: [Claude Code documentation](https://docs.anthropic.com/en/docs/claude-code/settings#tools-available-to-claude).
+API reference: [rubydoc.info/gems/claude-agent-sdk](https://rubydoc.info/gems/claude-agent-sdk). Available built-in tools: [Claude Code tools reference](https://code.claude.com/docs/en/tools-reference).
 
 ## Examples
 
@@ -219,7 +241,7 @@ Runnable scripts live in [`examples/`](https://github.com/rubycatco/claude-agent
 | Area | Examples |
 |------|----------|
 | Getting started | [quick_start](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/quick_start.rb) · [client](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/client_example.rb) · [streaming_input](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/streaming_input_example.rb) · [message_types](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/message_types_example.rb) · [error_handling](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/error_handling_example.rb) |
-| Sessions and output | [session_resumption](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/session_resumption_example.rb) · [structured_output](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/structured_output_example.rb) · [extended_thinking](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/extended_thinking_example.rb) · [session_stores/](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/session_stores/README.md) |
+| Sessions, subagents and output | [session_resumption](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/session_resumption_example.rb) · [subagent_status](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/subagent_status_example.rb) · [structured_output](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/structured_output_example.rb) · [extended_thinking](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/extended_thinking_example.rb) · [session_stores/](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/session_stores/README.md) |
 | Tools and MCP | [mcp_calculator](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/mcp_calculator.rb) · [mcp_resources_prompts](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/mcp_resources_prompts_example.rb) · [http_mcp_server](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/http_mcp_server_example.rb) |
 | Hooks and permissions | [hooks](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/hooks_example.rb) · [advanced_hooks](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/advanced_hooks_example.rb) · [lifecycle_hooks](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/lifecycle_hooks_example.rb) · [permission_callback](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/permission_callback_example.rb) |
 | Models and limits | [budget_control](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/budget_control_example.rb) · [fallback_model](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/fallback_model_example.rb) · [advisor](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/advisor_example.rb) · [bare_mode](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/bare_mode_example.rb) · [sandbox](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/examples/sandbox_example.rb) |
@@ -238,7 +260,7 @@ All three SDKs drive the same CLI over the same protocol, so capabilities line u
 | Hooks (all 33 events) | ✅ | 10 typed, the rest by name | ✅ |
 | Permission callbacks | ✅ | ✅ | ✅ |
 | Structured output | ✅ | ✅ | ✅ |
-| All 28 message types | ✅ | partial | ✅ |
+| Typed classes for every message type | ✅ | partial | ✅ |
 | [Sandbox](https://github.com/anthropic-experimental/sandbox-runtime) settings | ✅ | partial | ✅ |
 | Bare mode (`--bare`) | ✅ | via `extra_args` | ✅ |
 | File checkpointing & rewind | ✅ | ✅ | ✅ |
@@ -249,7 +271,7 @@ All three SDKs drive the same CLI over the same protocol, so capabilities line u
 | Custom transport (pluggable I/O) | — | ✅ | ✅ |
 | Rails integration | — | — | ✅ |
 
-Types are plain Ruby classes with `attr_accessor` and keyword arguments, mirroring the field names of the TypeScript Zod schemas and Python dataclasses; there is no runtime type checking.
+Types are plain Ruby classes with `attr_accessor` and keyword arguments, mirroring the field names of the TypeScript Zod schemas and Python dataclasses; there is no runtime type checking. The gem ships RBS signatures for its public API in `sig/`, which Steep and other RBS tools pick up through `rbs collection`.
 
 ## Claude Code plugin
 
@@ -272,7 +294,7 @@ RUN_INTEGRATION=1 bundle exec rspec  # also run the real-CLI integration suite (
 BUNDLE_GEMFILE=gemfiles/rails_8.gemfile bundle exec rspec --options spec/rails/.rspec  # Rails integration specs
 ```
 
-CI runs the suite and RuboCop on Ruby 3.2, 3.3, 3.4 and 4.0 on Linux, the suite on macOS, and the Rails specs against Rails 7.1 and 8, validates the RBS signatures and runs the suite under RBS runtime type checking. Weekly, and on PRs that touch the installer, the transport, `Query` or the message parser, it runs a keyless smoke test against the pinned CLI, and the integration suite as well when the repository has an API key. The gem ships RBS signatures for its public API in `sig/`, which Steep and other RBS tools pick up through `rbs collection`. See [CONTRIBUTING.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/CONTRIBUTING.md) for the development setup and [spec/README.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/spec/README.md) for the test layout.
+CI runs the suite and RuboCop on Ruby 3.2 through 4.0, the Rails specs on Rails 7.1 and 8, and both RBS tasks. See [CONTRIBUTING.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/CONTRIBUTING.md) for the development setup and the CI matrix, and [spec/README.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/spec/README.md) for the test layout.
 
 ## Contributing
 
