@@ -17,7 +17,7 @@ For everything else, open the matching `docs/` subpage:
 |-------|---------|
 | Bidirectional `Client` advanced features (`interrupt`, mid-session model/permission switching, MCP status); custom transports (E2B example, transport interface) | `docs/client.md` |
 | SDK MCP servers — tool definitions, JSON schema normalization, resources, prompts, mixed SDK + external server config | `docs/mcp-servers.md` |
-| All 27 hook events and typed input classes; permission callbacks (`PermissionResultAllow` / `PermissionResultDeny`) | `docs/hooks-and-permissions.md` |
+| All 33 hook events and typed input classes; permission callbacks (`PermissionResultAllow` / `PermissionResultDeny`) | `docs/hooks-and-permissions.md` |
 | Structured output (`output_format`), thinking config (adaptive/enabled/disabled + effort levels), cross-user prompt caching, budget control, fallback model, beta features, tools config, skills, sandbox settings, bare mode, session isolation (the CLI's auto-memory and how to turn it off), file checkpointing & rewind | `docs/configuration.md` |
 | Every `ClaudeAgentOptions` attribute with its type, default and the CLI flag, `initialize` field or environment variable it becomes; `extra_args`; the environment variables the SDK reads | `docs/options.md` |
 | Session listing, reading messages, renaming, tagging, deleting, forking, resume-at-message | `docs/sessions.md` |
@@ -264,7 +264,7 @@ ClaudeAgentSDK.tag_session(session_id: 'uuid', tag: 'important')
 ClaudeAgentSDK.tag_session(session_id: 'uuid', tag: nil)
 ```
 
-Hook with all 27 events example:
+Hook with all 33 events example:
 ```ruby
 options = ClaudeAgentSDK::ClaudeAgentOptions.new(
   hooks: {
