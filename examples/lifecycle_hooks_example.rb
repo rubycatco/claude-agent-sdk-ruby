@@ -7,7 +7,7 @@ require 'async'
 
 # Example: Session and lifecycle hook events
 #
-# The SDK supports 27 hook events. This example demonstrates the
+# The SDK supports 33 hook events. This example demonstrates the
 # lifecycle hooks beyond the basic PreToolUse/PostToolUse covered
 # in hooks_example.rb and advanced_hooks_example.rb.
 

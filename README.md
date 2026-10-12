@@ -24,7 +24,7 @@ A Ruby SDK for the [Claude Code](https://docs.claude.com/en/docs/claude-code-ove
 - **Same wire protocol as the official SDKs.** Spawns the `claude` CLI as a subprocess and speaks stream-JSON over stdin/stdout, so every feature of the runtime is available: sessions, subagents, sandboxing, structured output, file checkpointing and rewind.
 - **`query()` for one-shot calls, `Client` for bidirectional sessions** with interrupts, mid-session model switching, and streaming input from any `Enumerator`.
 - **In-process custom tools.** Define tools as Ruby blocks; they run inside your process with direct access to your app state (SDK MCP servers), with JSON-Schema-validated arguments.
-- **All 27 hook events and permission callbacks** with typed inputs, so you can gate, audit, or rewrite every tool call.
+- **All 33 hook events and permission callbacks** with typed inputs, so you can gate, audit, or rewrite every tool call.
 - **Pluggable transport** to run the CLI somewhere else (an E2B microVM, a container, over SSH).
 
 ## Installation
@@ -182,7 +182,7 @@ A String return is sent to Claude as a single text block. Return a Hash instead 
 
 ### Hooks and permission callbacks
 
-Hooks run your Ruby code at any of the 27 lifecycle events (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `PreCompact`, …) with typed inputs. Permission callbacks decide programmatically whether a tool call may proceed.
+Hooks run your Ruby code at any of the 33 lifecycle events (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `PreCompact`, …) with typed inputs. Permission callbacks decide programmatically whether a tool call may proceed.
 
 ```ruby
 options = ClaudeAgentSDK::ClaudeAgentOptions.new(
@@ -235,7 +235,7 @@ All three SDKs drive the same CLI over the same protocol, so capabilities line u
 | Bidirectional `Client` | ✅ | ✅ | ✅ |
 | Streaming input | `AsyncIterable` | `AsyncIterable` | `Enumerator` |
 | Custom tools (SDK MCP servers) | `tool()` | `@tool` decorator | `create_tool` block |
-| Hooks (all 27 events) | ✅ | 10 typed, the rest by name | ✅ |
+| Hooks (all 33 events) | ✅ | 10 typed, the rest by name | ✅ |
 | Permission callbacks | ✅ | ✅ | ✅ |
 | Structured output | ✅ | ✅ | ✅ |
 | All 28 message types | ✅ | partial | ✅ |

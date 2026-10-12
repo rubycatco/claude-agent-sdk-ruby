@@ -2529,6 +2529,27 @@ RSpec.describe ClaudeAgentSDK do
       end
     end
 
+    describe ClaudeAgentSDK::HookSpecificOutputFields do
+      # Declared in the class body, where YARD (the published API reference)
+      # sees them; the helper only adds what is the same for every class.
+      it 'takes the fields from the attributes the class declares, in that order' do
+        output = ClaudeAgentSDK::SessionStartHookSpecificOutput.new(
+          reload_skills: false, watch_paths: %w[/src], session_title: 'Triage', additional_context: 'ctx'
+        )
+
+        expect(output.to_h.to_a).to eq(
+          [[:hookEventName, 'SessionStart'], [:additionalContext, 'ctx'], [:sessionTitle, 'Triage'],
+           [:watchPaths, %w[/src]], [:reloadSkills, false]]
+        )
+      end
+
+      it 'keeps hook_event_name out of reach of the constructor' do
+        output = ClaudeAgentSDK::StopHookSpecificOutput.new(hook_event_name: 'PreToolUse', additional_context: 'ctx')
+
+        expect(output.to_h).to eq(hookEventName: 'Stop', additionalContext: 'ctx')
+      end
+    end
+
     describe ClaudeAgentSDK::CwdChangedHookSpecificOutput do
       it 'converts to CLI format' do
         output = described_class.new(watch_paths: ['/src', '/test'])
@@ -2993,6 +3014,27 @@ RSpec.describe ClaudeAgentSDK do
         expect(msg.inspect).to eq('#<ClaudeAgentSDK::InitMessage subtype="init" session_id="sess_1" ' \
                                   'model="claude-opus-5" tools=["Bash", "Read"]>')
         expect(msg.data).to include(session_id: 'sess_1')
+      end
+    end
+
+    describe ClaudeAgentSDK::BaseHookInput do
+      it 'omits the duplicate @raw_input from typed inputs such as PreToolUseHookInput' do
+        payload = { hook_event_name: 'PreToolUse', session_id: 'sess_1', tool_name: 'Bash', scratchpad_dir: '/tmp/s' }
+        input = ClaudeAgentSDK::PreToolUseHookInput.from_hash(payload)
+        input.raw_input = payload
+
+        expect(input.inspect).to eq('#<ClaudeAgentSDK::PreToolUseHookInput session_id="sess_1" tool_name="Bash" ' \
+                                    'hook_event_name="PreToolUse">')
+        expect(input.raw_input).to include(scratchpad_dir: '/tmp/s')
+      end
+
+      it 'keeps @raw_input in #inspect on an UnknownHookInput, where it is the only payload' do
+        payload = { hook_event_name: 'FutureEvent', detail: 'x' }
+        input = ClaudeAgentSDK::UnknownHookInput.from_hash(payload)
+        input.raw_input = payload
+
+        expect(input.inspect).to eq('#<ClaudeAgentSDK::UnknownHookInput hook_event_name="FutureEvent" ' \
+                                    'raw_input={hook_event_name: "FutureEvent", detail: "x"}>')
       end
     end
 

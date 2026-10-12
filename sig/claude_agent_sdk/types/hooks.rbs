@@ -423,7 +423,13 @@ module ClaudeAgentSDK
 
     attr_accessor prompt_cache_warm: bool?
 
+    # "5m" or "1h".
+    attr_accessor cache_ttl: String?
+
     attr_accessor estimated_cache_write_usd: Numeric?
+
+    # The rate the estimate used: "configured", "catalog" or "default".
+    attr_accessor pricing: String?
   end
 
   class PostModelSwitchHookInput < BaseHookInput
@@ -440,7 +446,13 @@ module ClaudeAgentSDK
 
     attr_accessor prompt_cache_warm: bool?
 
+    # "5m" or "1h".
+    attr_accessor cache_ttl: String?
+
     attr_accessor estimated_cache_write_usd: Numeric?
+
+    # The rate the estimate used: "configured", "catalog" or "default".
+    attr_accessor pricing: String?
   end
 
   class DirectoryAddedHookInput < BaseHookInput

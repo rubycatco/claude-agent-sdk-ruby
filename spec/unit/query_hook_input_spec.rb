@@ -5,7 +5,7 @@ require 'spec_helper'
 # What a hook callback is handed, for every hook event: the typed input the
 # SDK builds from a `hook_callback` control request, checked reader by
 # reader. A field mapped from the wrong key, or dropped, used to pass the
-# whole suite for 19 of the 27 events.
+# whole suite for 19 of the 27 events the SDK had then.
 #
 # One row per event in ClaudeAgentSDK::HOOK_EVENTS. An event without a row,
 # and a reader its row gives no value to, both fail here — so the table has
@@ -42,11 +42,11 @@ RSpec.describe ClaudeAgentSDK::Query do
       'PreCompact' => { trigger: :string, custom_instructions: :string },
       'PostCompact' => { trigger: :string, compact_summary: :string },
       'PreModelSwitch' => { from_model: :string, to_model: :string, requested_model: :string, source: :string,
-                            context_tokens: :integer, prompt_cache_warm: :boolean,
-                            estimated_cache_write_usd: :number },
+                            context_tokens: :integer, prompt_cache_warm: :boolean, cache_ttl: :string,
+                            estimated_cache_write_usd: :number, pricing: :string },
       'PostModelSwitch' => { from_model: :string, to_model: :string, requested_model: :string, source: :string,
-                             context_tokens: :integer, prompt_cache_warm: :boolean,
-                             estimated_cache_write_usd: :number },
+                             context_tokens: :integer, prompt_cache_warm: :boolean, cache_ttl: :string,
+                             estimated_cache_write_usd: :number, pricing: :string },
       'PermissionRequest' => { tool_name: :string, tool_input: :object, permission_suggestions: :objects,
                                agent_id: :string, agent_type: :string },
       'PermissionDenied' => { tool_name: :string, tool_input: :object, tool_use_id: :string, reason: :string,

@@ -72,6 +72,17 @@ module ClaudeAgentSDK
     attr_accessor :session_id, :transcript_path, :cwd, :permission_mode,
                   :prompt_id, :effort, :raw_input
     attr_reader :hook_event_name
+
+    private
+
+    # A typed input already exposes the fields of its payload as attributes;
+    # repeating @raw_input would double the output. An UnknownHookInput keeps
+    # it, since @raw_input is the only place its payload lives.
+    def inspect_attributes
+      return super if is_a?(UnknownHookInput)
+
+      super.reject { |pair| pair.first == 'raw_input' }
+    end
   end
 
   # PreToolUse hook input
@@ -384,11 +395,13 @@ module ClaudeAgentSDK
 
   # PreModelSwitch hook input. `requested_model` is what was asked for (an
   # alias, a full id, or nil for the default); `from_model` and `to_model`
-  # are resolved ids. `context_tokens`, `prompt_cache_warm` and
-  # `estimated_cache_write_usd` describe what switching costs.
+  # are resolved ids. `context_tokens`, `prompt_cache_warm`, `cache_ttl`
+  # ("5m" or "1h") and `estimated_cache_write_usd` describe what switching
+  # costs; `pricing` says which rate the estimate used ("configured",
+  # "catalog" or "default").
   class PreModelSwitchHookInput < BaseHookInput
     attr_accessor :from_model, :to_model, :requested_model, :source,
-                  :context_tokens, :prompt_cache_warm, :estimated_cache_write_usd
+                  :context_tokens, :prompt_cache_warm, :cache_ttl, :estimated_cache_write_usd, :pricing
 
     def initialize(attributes = {})
       super
@@ -399,7 +412,7 @@ module ClaudeAgentSDK
   # PostModelSwitch hook input (the fields of PreModelSwitchHookInput)
   class PostModelSwitchHookInput < BaseHookInput
     attr_accessor :from_model, :to_model, :requested_model, :source,
-                  :context_tokens, :prompt_cache_warm, :estimated_cache_write_usd
+                  :context_tokens, :prompt_cache_warm, :cache_ttl, :estimated_cache_write_usd, :pricing
 
     def initialize(attributes = {})
       super
@@ -524,19 +537,33 @@ module ClaudeAgentSDK
     private_class_method :rename
   end
 
-  # Declares a *HookSpecificOutput class: the event it answers and its
-  # fields. Each field is an attribute; #to_h writes hookEventName and every
-  # field that is not nil, under the key HookOutputKeys::HOOK_SPECIFIC
-  # gives it (the attribute name when the table has no entry).
+  # Completes a *HookSpecificOutput class, which declares its fields with
+  # attr_accessor and then names the event it answers. #to_h writes
+  # hookEventName and every one of those fields that is not nil, under the
+  # key HookOutputKeys::HOOK_SPECIFIC gives it (the attribute name when the
+  # table has no entry).
   #
   # @api private
   module HookSpecificOutputFields
-    def hook_specific_output(event, *fields)
+    # The fields are the attributes the class has declared when this is
+    # called, so it goes after attr_accessor.
+    #
+    # @!macro [attach] hook_specific_output
+    #   @!attribute [r] hook_event_name
+    #     @return [String] "$1"
+    #   @!method initialize(attributes = {})
+    #     Takes the fields by attribute name; an unknown one raises ArgumentError.
+    #   @!method to_h
+    #     The output as the CLI reads it: `hookEventName` and every field
+    #     that is not nil, under its wire key.
+    #     @return [Hash{Symbol => Object}]
+    def hook_specific_output(event)
       strict_attributes
-      attr_accessor(*fields)
+      wire_keys = own_attribute_names.to_h do |name|
+        [:"@#{name}", HookOutputKeys::HOOK_SPECIFIC.fetch(name, name).to_sym]
+      end
       attr_reader :hook_event_name
 
-      wire_keys = fields.to_h { |field| [:"@#{field}", HookOutputKeys::HOOK_SPECIFIC.fetch(field.to_s, field.to_s).to_sym] }
       define_method(:initialize) do |attributes = {}|
         super(attributes)
         @hook_event_name = event
@@ -554,15 +581,18 @@ module ClaudeAgentSDK
   class SetupHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'Setup', :additional_context
+    attr_accessor :additional_context
+
+    hook_specific_output 'Setup'
   end
 
   # PreToolUse hook specific output
   class PreToolUseHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'PreToolUse',
-                         :permission_decision, :permission_decision_reason, :updated_input, :additional_context
+    attr_accessor :permission_decision, :permission_decision_reason, :updated_input, :additional_context
+
+    hook_specific_output 'PreToolUse'
   end
 
   # PostToolUse hook specific output.
@@ -575,21 +605,27 @@ module ClaudeAgentSDK
   class PostToolUseHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'PostToolUse', :additional_context, :updated_tool_output, :updated_mcp_tool_output
+    attr_accessor :additional_context, :updated_tool_output, :updated_mcp_tool_output
+
+    hook_specific_output 'PostToolUse'
   end
 
   # PostToolUseFailure hook specific output
   class PostToolUseFailureHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'PostToolUseFailure', :additional_context
+    attr_accessor :additional_context
+
+    hook_specific_output 'PostToolUseFailure'
   end
 
   # PostToolBatch hook specific output
   class PostToolBatchHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'PostToolBatch', :additional_context
+    attr_accessor :additional_context
+
+    hook_specific_output 'PostToolBatch'
   end
 
   # UserPromptSubmit hook specific output. `session_title` sets the session
@@ -598,7 +634,9 @@ module ClaudeAgentSDK
   class UserPromptSubmitHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'UserPromptSubmit', :additional_context, :session_title, :suppress_original_prompt
+    attr_accessor :additional_context, :session_title, :suppress_original_prompt
+
+    hook_specific_output 'UserPromptSubmit'
   end
 
   # UserPromptExpansion hook specific output (`suppress_original_prompt` as
@@ -606,21 +644,27 @@ module ClaudeAgentSDK
   class UserPromptExpansionHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'UserPromptExpansion', :additional_context, :suppress_original_prompt
+    attr_accessor :additional_context, :suppress_original_prompt
+
+    hook_specific_output 'UserPromptExpansion'
   end
 
   # Notification hook specific output
   class NotificationHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'Notification', :additional_context
+    attr_accessor :additional_context
+
+    hook_specific_output 'Notification'
   end
 
   # SubagentStart hook specific output
   class SubagentStartHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'SubagentStart', :additional_context
+    attr_accessor :additional_context
+
+    hook_specific_output 'SubagentStart'
   end
 
   # Stop hook specific output. `additional_context` is feedback for the
@@ -628,7 +672,9 @@ module ClaudeAgentSDK
   class StopHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'Stop', :additional_context
+    attr_accessor :additional_context
+
+    hook_specific_output 'Stop'
   end
 
   # SubagentStop hook specific output (`additional_context` as on
@@ -636,14 +682,18 @@ module ClaudeAgentSDK
   class SubagentStopHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'SubagentStop', :additional_context
+    attr_accessor :additional_context
+
+    hook_specific_output 'SubagentStop'
   end
 
   # PermissionRequest hook specific output
   class PermissionRequestHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'PermissionRequest', :decision
+    attr_accessor :decision
+
+    hook_specific_output 'PermissionRequest'
   end
 
   # SessionStart hook specific output. `initial_user_message` becomes the
@@ -654,8 +704,9 @@ module ClaudeAgentSDK
   class SessionStartHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'SessionStart',
-                         :additional_context, :initial_user_message, :session_title, :watch_paths, :reload_skills
+    attr_accessor :additional_context, :initial_user_message, :session_title, :watch_paths, :reload_skills
+
+    hook_specific_output 'SessionStart'
   end
 
   # PermissionDenied hook specific output. `retry: true` tells the model it
@@ -664,7 +715,9 @@ module ClaudeAgentSDK
   class PermissionDeniedHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'PermissionDenied', :retry
+    attr_accessor :retry
+
+    hook_specific_output 'PermissionDenied'
   end
 
   # PreModelSwitch hook specific output. `permission_decision` "allow"
@@ -673,7 +726,9 @@ module ClaudeAgentSDK
   class PreModelSwitchHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'PreModelSwitch', :permission_decision, :permission_decision_reason
+    attr_accessor :permission_decision, :permission_decision_reason
+
+    hook_specific_output 'PreModelSwitch'
   end
 
   # PostModelSwitch hook specific output (`additional_context` reaches the
@@ -681,7 +736,9 @@ module ClaudeAgentSDK
   class PostModelSwitchHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'PostModelSwitch', :additional_context
+    attr_accessor :additional_context
+
+    hook_specific_output 'PostModelSwitch'
   end
 
   # Elicitation hook specific output: answers an MCP elicitation request.
@@ -690,7 +747,9 @@ module ClaudeAgentSDK
   class ElicitationHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'Elicitation', :action, :content
+    attr_accessor :action, :content
+
+    hook_specific_output 'Elicitation'
   end
 
   # ElicitationResult hook specific output: overrides the action or content
@@ -698,7 +757,9 @@ module ClaudeAgentSDK
   class ElicitationResultHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'ElicitationResult', :action, :content
+    attr_accessor :action, :content
+
+    hook_specific_output 'ElicitationResult'
   end
 
   # CwdChanged hook specific output (`watch_paths` replaces the dynamic
@@ -706,7 +767,9 @@ module ClaudeAgentSDK
   class CwdChangedHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'CwdChanged', :watch_paths
+    attr_accessor :watch_paths
+
+    hook_specific_output 'CwdChanged'
   end
 
   # FileChanged hook specific output (`watch_paths` as on
@@ -714,7 +777,9 @@ module ClaudeAgentSDK
   class FileChangedHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'FileChanged', :watch_paths
+    attr_accessor :watch_paths
+
+    hook_specific_output 'FileChanged'
   end
 
   # WorktreeCreate hook specific output (`worktree_path`: the absolute path
@@ -722,7 +787,9 @@ module ClaudeAgentSDK
   class WorktreeCreateHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'WorktreeCreate', :worktree_path
+    attr_accessor :worktree_path
+
+    hook_specific_output 'WorktreeCreate'
   end
 
   # MessageDisplay hook specific output. `display_content` replaces the text
@@ -731,7 +798,9 @@ module ClaudeAgentSDK
   class MessageDisplayHookSpecificOutput < Type
     extend HookSpecificOutputFields
 
-    hook_specific_output 'MessageDisplay', :display_content
+    attr_accessor :display_content
+
+    hook_specific_output 'MessageDisplay'
   end
 
   # Async hook JSON output
