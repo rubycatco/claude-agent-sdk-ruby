@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-12
+
 ### Added
 - **Every hook input carries `raw_input`**, the payload exactly as the CLI sent it. It used to be on `UnknownHookInput` only; a typed input copied the fields its class names and dropped the rest, so a field a newer CLI added was out of reach until the SDK learned it. Hook inputs are now built from the whole payload (every field the class declares, read from the same key as before). `#inspect` shows it on an `UnknownHookInput` only: a typed input already prints those fields as attributes.
 - Hook input fields the CLI already sends (Python SDK #1331, plus the schemas of Claude Code 2.1.295): `prompt_id` and `effort` on every hook input; `duration_ms` on `PostToolUseHookInput` and `PostToolUseFailureHookInput`; `session_title` and `source` on `UserPromptSubmitHookInput`; `session_title`, `seconds_since_last_response`, `prompt_cache_likely_expired`, `context_tokens` and `estimated_cache_write_usd` on `SessionStartHookInput`; `parent_file_path` on `InstructionsLoadedHookInput`.
