@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - README: the Claude Code overview link (it led to a "Page not found" page) and the built-in tools link now point at `code.claude.com`. "Rails in a minute" is a section of its own after the Quick Start, and its job turns off auto-memory (`CLAUDE_CODE_DISABLE_AUTO_MEMORY`) as the Rails guide's does. The hooks example defines the two callbacks it passes, the custom-tool example runs a prompt, and the Examples table lists `subagent_status_example.rb`. What a session without credentials, or with a rejected key, returns is now described in a new "Authentication Failures" section of `docs/errors.md`.
+- `CLIInstaller::PINNED_CLI_VERSION` moves from 2.1.295 to **2.1.301**, following the CLI the Python SDK bundles. `CLIInstaller.install_pinned` installs it. See the [Claude Code changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
 
 ## [1.3.0] - 2026-10-12
 
