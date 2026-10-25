@@ -211,10 +211,21 @@ A plain script that does not trap INT is no worse off: Ctrl-C still raises `Inte
 When the CLI process stops:
 
 - On `Client#disconnect`, or at the end of a `Client.open` block or a `query()` call, the usual teardown runs: the SDK closes the CLI's stdin, gives it a grace period to finish, then sends SIGTERM and finally SIGKILL.
-- When the interpreter exits normally without a disconnect, an `at_exit` handler sends SIGTERM to the CLI process. Best effort: it does not wait for the turn.
+- When the interpreter exits normally without a disconnect, an `at_exit` handler sends SIGTERM to the CLI process only, not its group. Best effort: it does not wait for the turn, and sends no SIGKILL.
 - When your process dies abruptly (`exit!`, SIGKILL), the SDK cleans up nothing. The CLI sees its stdin close, which normally lets it wind down; how soon is up to the CLI and its background work (see [`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`](#claude_code_print_bg_wait_ceiling_ms)).
 
-In every case the SDK signals the CLI process only, not its group. The processes the CLI starts are its own to stop, and with the option on they no longer get the terminal's SIGINT either.
+SIGTERM still goes to the CLI process only, so the CLI can stop the processes it started in its own order (it does so for stdio MCP servers). Whenever the SDK sends the CLI SIGKILL, that SIGKILL also goes to the CLI's process group, so processes still in that group die with the CLI instead of outliving it: a CLI that has to be killed cannot stop them itself, and with the option on they no longer get the terminal's SIGINT either. The group SIGKILL follows the SDK's own SIGKILL decisions and adds no delay of its own. The SDK sends the CLI SIGKILL when it is still running:
+
+- on a normal teardown (disconnect, the end of a `Client.open` block or a `query()` call): after stdin EOF, a grace period, SIGTERM and a second grace period;
+- when that teardown is itself cancelled before it got there (`Async::Stop`, a task timeout): SIGTERM at once, then SIGKILL after a short grace, with no grace for stdin EOF first;
+- when the CLI has closed its stdout but kept running: after a grace period of its own, SIGTERM and a second grace period.
+
+What it does not do:
+
+- When the CLI exits on its own, or on SIGTERM, before a SIGKILL is due, the SDK sends its group nothing. Its children are the CLI's to stop; one that ignores the CLI's request is not chased.
+- A process that moved to another process group is not reached.
+- The SDK does not wait for or reap the processes the group SIGKILL reaches: they are the CLI's children, not the SDK's.
+- On Windows nothing changes: the SDK signals the CLI process only.
 
 The CLI's group is a background group of the terminal. A process in it that reads from the controlling terminal (a tool command that prompts on the tty) is stopped with SIGTTIN, and so is the rest of the group, the CLI included when the tool shares its group. Whether writing to the terminal stops it too depends on the terminal's TOSTOP setting. The SDK's own traffic with the CLI goes through pipes and is unaffected.
 

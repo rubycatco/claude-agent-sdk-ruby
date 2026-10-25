@@ -27,6 +27,16 @@ require 'json'
 #   stderr_then_fail  writes FAKE_CLAUDE_STDERR_LINES lines to stderr, waits for EOF, exits 1
 #   exit_at_once      exits 0 without reading anything
 #
+# Control requests only specs send, in any scenario, to make the child act at
+# a moment they choose (the real CLI answers neither):
+#   fake_setpgid       moves the child into the process group `pgid`;
+#                      answers with the group it is in afterwards
+#   fake_spawn_child   starts a child that stays in this one's process group
+#                      and exits at its own stdin EOF, which this one holds;
+#                      answers with its pid and pgid. Reaped at this one's
+#                      stdin EOF; if this one dies first, the child sees EOF.
+#   fake_close_stdout  answers, then lets go of stdout and keeps running
+#
 # For the control channel alone, in process, see ScriptedCLI.
 module FakeClaude
   # What `-v` prints: a version the SDK accepts without a warning.
@@ -94,6 +104,7 @@ module FakeClaude
       @backlog = []
       @hooks = {}
       @ids = 0
+      @children = {} # pid => the write end of its stdin
     end
 
     def run
@@ -161,9 +172,11 @@ module FakeClaude
         end
       end
       log('eof')
+      reap_children
     end
 
     def answer_control_request(frame)
+      return answer_fake_request(frame) if frame.dig('request', 'subtype').to_s.start_with?('fake_')
       return emit_control_response(frame, {}) unless frame.dig('request', 'subtype') == 'initialize'
 
       @hooks = frame.dig('request', 'hooks') || {}
@@ -176,6 +189,35 @@ module FakeClaude
         ask_sdk_server(name, method: 'notifications/initialized')
         ask_sdk_server(name, method: 'tools/list', id: 1)
       end
+    end
+
+    # The fake_* requests listed at the top of this file.
+    def answer_fake_request(frame)
+      case frame.dig('request', 'subtype')
+      when 'fake_setpgid'
+        Process.setpgid(0, Integer(frame.dig('request', 'pgid')))
+        emit_control_response(frame, pgid: Process.getpgrp)
+      when 'fake_spawn_child'
+        require 'rbconfig'
+        reader, writer = IO.pipe
+        pid = Process.spawn(RbConfig.ruby, '--disable-gems', '-e', 'STDIN.read', in: reader)
+        reader.close
+        @children[pid] = writer
+        log('child', pid: pid)
+        emit_control_response(frame, pid: pid, pgid: Process.getpgid(pid))
+      when 'fake_close_stdout'
+        emit_control_response(frame, {})
+        $stdout.reopen(File::NULL, 'w')
+      else
+        emit_control_response(frame, {})
+      end
+    end
+
+    # Each child exits at its stdin EOF, so closing that is enough.
+    def reap_children
+      @children.each_value(&:close)
+      @children.each_key { |pid| Process.wait(pid) }
+      @children.clear
     end
 
     # One turn: the frames CLI 2.1.286 emits for a prompt answered with text,

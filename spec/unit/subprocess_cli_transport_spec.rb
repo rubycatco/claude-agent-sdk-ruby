@@ -2175,6 +2175,186 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
       expect(described_class.active_processes).to include(waiter)
     end
   end
+
+  # With process_group the CLI leads a process group of its own, and every
+  # SIGKILL the SDK sends it goes to that group first (its children in the
+  # group die with it). SIGTERM stays on the pid. Each KILL site, with the
+  # option on and off; Process.kill only records here. Real processes:
+  # subprocess_cli_transport_fake_cli_spec.rb.
+  describe 'SIGKILL to the process group of a CLI started with process_group' do
+    let(:pid) { 4242 }
+    let(:waiter) { instance_double(Process::Waiter, pid: pid, alive?: true, join: nil) }
+    let(:signals) { [] }
+
+    before do
+      allow(Process).to receive(:kill) { |signal, target| signals << [signal, target] }
+    end
+
+    # A transport whose own #connect spawned +waiter+ with the option as
+    # given: eligibility comes from the real spawn line.
+    def connected(process_group:, stdout: StringIO.new)
+      options = ClaudeAgentSDK::ClaudeAgentOptions.new(cli_path: '/usr/bin/claude', process_group: process_group)
+      transport = described_class.new('hi', options)
+      allow(transport).to receive(:check_claude_version)
+      allow(Open3).to receive(:popen3).and_return([StringIO.new, stdout, StringIO.new, waiter])
+      connect_draining_stderr(transport)
+      transport
+    end
+
+    def kill_sequence(process_group)
+      process_group ? [['KILL', -pid], ['KILL', pid]] : [['KILL', pid]]
+    end
+
+    # Makes the group signal fail, recording it all the same.
+    def group_kill_raises(error)
+      allow(Process).to receive(:kill).with('KILL', -pid) do |signal, target|
+        signals << [signal, target]
+        raise error
+      end
+    end
+
+    def close_through_kill(transport)
+      allow(transport).to receive(:wait_process_with_timeout).and_raise(Timeout::Error)
+      allow(waiter).to receive(:value).and_return(instance_double(Process::Status))
+      expect { transport.close }.not_to output.to_stderr
+    end
+
+    def fallback_through_kill(transport)
+      worker = transport.force_terminate_in_background(waiter, grace_seconds: 0.01)
+      expect(worker.join(10)).not_to be_nil
+    end
+
+    # The waiter never reports an exit, so the last bounded wait lapses too:
+    # the error is the "could not be reaped" one, and ownership stays.
+    def read_through_kill(transport)
+      stub_const("#{described_class}::EOF_EXIT_GRACE_SECONDS", 0.01)
+      stub_const("#{described_class}::EOF_TERM_GRACE_SECONDS", 0.01)
+      expect { transport.read_messages { |m| m } }
+        .to raise_error(ClaudeAgentSDK::ProcessError, /could not be reaped even after SIGKILL/)
+    end
+
+    describe 'eligibility, captured at spawn' do
+      it 'holds for the process #connect spawned with pgroup: true, and for no other' do
+        expect(connected(process_group: true).group_leader?(waiter)).to be(true)
+        expect(connected(process_group: true).group_leader?(instance_double(Process::Waiter))).to be(false)
+        expect(connected(process_group: false).group_leader?(waiter)).to be(false)
+        expect(described_class.new('hi', ClaudeAgentSDK::ClaudeAgentOptions.new(cli_path: '/usr/bin/claude')).group_leader?(nil)).to be(false)
+      end
+
+      it 'does not hold on Windows, where the spawn uses new_pgroup instead' do
+        allow(Gem).to receive(:win_platform?).and_return(true)
+        transport = connected(process_group: true)
+
+        expect(transport.group_leader?(waiter)).to be(false)
+        close_through_kill(transport)
+        expect(signals).to eq([['TERM', pid], ['KILL', pid]])
+      end
+
+      it 'follows the spawn, not the options changed after it' do
+        options = ClaudeAgentSDK::ClaudeAgentOptions.new(cli_path: '/usr/bin/claude', process_group: true)
+        transport = described_class.new('hi', options)
+        allow(transport).to receive(:check_claude_version)
+        first = instance_double(Process::Waiter, alive?: false)
+        allow(Open3).to receive(:popen3).and_return([StringIO.new, StringIO.new, StringIO.new, first],
+                                                    [StringIO.new, StringIO.new, StringIO.new, waiter])
+        connect_draining_stderr(transport)
+
+        options.process_group = false
+        expect(transport.group_leader?(first)).to be(true)
+
+        transport.close
+        connect_draining_stderr(transport) # spawned again, now without the option
+        expect(transport.group_leader?(waiter)).to be(false)
+        expect(transport.group_leader?(first)).to be(false)
+      end
+    end
+
+    [true, false].each do |process_group|
+      context "with process_group: #{process_group}" do
+        it 'teardown escalation: TERM to the pid, then KILL' do
+          close_through_kill(connected(process_group: process_group))
+
+          expect(signals).to eq([['TERM', pid], *kill_sequence(process_group)])
+          expect(described_class.active_processes).not_to include(waiter)
+        end
+
+        it 'cancellation fallback: TERM to the pid at once, then KILL' do
+          transport = connected(process_group: process_group)
+          # The fallback runs from #close's ensure, after the options may
+          # have changed; it asks the spawn, not them.
+          transport.instance_variable_get(:@options).process_group = !process_group
+          fallback_through_kill(transport)
+
+          expect(signals).to eq([['TERM', pid], *kill_sequence(process_group)])
+          expect(described_class.active_processes).to include(waiter) # never reaped: still owned
+        end
+
+        it 'wait after stdout EOF: TERM to the pid, then KILL' do
+          read_through_kill(connected(process_group: process_group, stdout: StringIO.new('')))
+
+          expect(signals).to eq([['TERM', pid], *kill_sequence(process_group)])
+          expect(described_class.active_processes).to include(waiter)
+        end
+      end
+    end
+
+    # The group KILL reaches the CLI too, and its waiter can reap it before
+    # the pid KILL that follows, which then raises ESRCH: a successful
+    # termination, waited for like any other, with no cleanup warning.
+    it 'teardown escalation still waits, silently, when the group KILL reaped the CLI before the pid KILL' do
+      transport = connected(process_group: true)
+      allow(Process).to receive(:kill).with('KILL', pid) do |signal, target|
+        signals << [signal, target]
+        raise Errno::ESRCH
+      end
+
+      close_through_kill(transport)
+
+      expect(signals).to eq([['TERM', pid], ['KILL', -pid], ['KILL', pid]])
+      expect(waiter).to have_received(:value)
+      expect(described_class.active_processes).not_to include(waiter)
+    end
+
+    it 'leaves the at_exit reaper on SIGTERM to the pid' do
+      connected(process_group: true)
+
+      described_class.kill_active_processes
+
+      expect(signals).to eq([['TERM', pid]])
+    end
+
+    # The group signal says nothing about the CLI: an empty group (ESRCH) or
+    # one it cannot signal (EPERM) changes none of what follows.
+    [Errno::ESRCH, Errno::EPERM].each do |error|
+      context "when the group KILL raises #{error}" do
+        before { group_kill_raises(error) }
+
+        it 'teardown escalation still KILLs the pid, waits for it, and deregisters it, without a warning' do
+          transport = connected(process_group: true)
+          close_through_kill(transport)
+
+          expect(signals).to eq([['TERM', pid], ['KILL', -pid], ['KILL', pid]])
+          expect(waiter).to have_received(:value)
+          expect(described_class.active_processes).not_to include(waiter)
+        end
+
+        it 'the cancellation fallback still KILLs the pid and keeps the unreaped process' do
+          fallback_through_kill(connected(process_group: true))
+
+          expect(signals).to eq([['TERM', pid], ['KILL', -pid], ['KILL', pid]])
+          expect(described_class.active_processes).to include(waiter)
+        end
+
+        it 'the wait after stdout EOF still KILLs the pid and stays bounded' do
+          read_through_kill(connected(process_group: true, stdout: StringIO.new('')))
+
+          expect(signals).to eq([['TERM', pid], ['KILL', -pid], ['KILL', pid]])
+          expect(described_class.active_processes).to include(waiter)
+        end
+      end
+    end
+  end
+
   describe '#connect — pipe encoding (locale independence)' do
     # popen3 pipes inherit Encoding.default_external (US-ASCII under
     # LANG=C/LC_ALL=C). Instead of mutating the locale, pre-tag real pipe
