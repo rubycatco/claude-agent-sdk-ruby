@@ -10,7 +10,8 @@ require 'json'
 # signal), connects a real SubprocessCLITransport to FakeClaude, and answers
 # the spec's commands, one JSON line each:
 #
-#   (at start)  ready: pids and process groups of the host and the CLI
+#   (at start)  spawned: the CLI's pid, as soon as the CLI is started
+#               ready: pids and process groups of the host and the CLI
 #   int?        whether the host's INT trap ran (waits for it, bounded)
 #   ping        a fresh control request to the CLI, and its response
 #   waiter      how the CLI process ended, from its Open3 waiter
@@ -26,18 +27,23 @@ module ProcessGroupHost
   module_function
 
   # Child-process entry point:
-  # `ruby -e 'ProcessGroupHost.main(ARGV)' OPTIONS_JSON`, where OPTIONS_JSON
-  # holds the ClaudeAgentOptions attributes for the transport.
+  # `ruby -e 'ProcessGroupHost.main(ARGV)' CONFIG_JSON`, where CONFIG_JSON
+  # holds `options`, the ClaudeAgentOptions attributes for the transport,
+  # and `stall_before_ready`, which makes the host hang for good after the
+  # initialize exchange, never reading its stdin again: what the spec's
+  # cleanup must survive when readiness fails.
   def main(argv)
     $stdout.sync = true
+    config = JSON.parse(argv.fetch(0))
     interrupts = Thread::Queue.new
     trap('INT') { interrupts << :int } # no SDK call in here: Ruby forbids it in a trap
-    transport = ClaudeAgentSDK::SubprocessCLITransport.new(
-      ClaudeAgentSDK::ClaudeAgentOptions.new(JSON.parse(argv.fetch(0)))
-    )
+    transport = ClaudeAgentSDK::SubprocessCLITransport.new(ClaudeAgentSDK::ClaudeAgentOptions.new(config['options']))
     transport.connect
+    # Before anything that could hang, so the spec can always clean the CLI up.
+    reply(event: 'spawned', child_pid: transport.instance_variable_get(:@process).pid)
     child_pid = request(transport, INITIALIZE_ID, subtype: 'initialize', hooks: nil, agents: nil)
                 .dig(:response, :response, :pid)
+    sleep if config['stall_before_ready']
     reply(event: 'ready', trap: true, host_pid: Process.pid, host_pgid: Process.getpgrp,
           child_pid: child_pid, child_pgid: Process.getpgid(child_pid))
     serve(transport, interrupts)

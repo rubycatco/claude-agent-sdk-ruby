@@ -182,24 +182,27 @@ These options describe the process the SDK starts itself. A [custom transport](c
 
 In a terminal, Ctrl-C sends SIGINT to every process of the foreground process group. The CLI is in your process's group, so it gets the signal at the same moment your process does and ends the turn on its own, before your code can decide what to do: interrupt and keep the partial reply, ask whether to stop, or ignore the keypress. With `process_group: true` the CLI process the SDK starts for the session begins in a process group of its own, and the terminal's SIGINT no longer reaches it, nor the processes it starts that stay in its group (Bash tool commands, stdio MCP servers). The short `claude -v` version check that runs before it stays in your group.
 
-It applies to `query()` and `Client` alike, on the default transport. A [custom transport](client.md#custom-transport) starts the CLI its own way. A transport subclass whose `#build_command` wraps the CLI in another program (`docker exec`, `ssh`) puts that local program in a group of its own; the option does not set the process group of a CLI on the far side. This option is in neither the Python nor the TypeScript SDK.
+It applies to `query()` and `Client` alike, on the default transport. A [custom transport](client.md#custom-transport) starts the CLI its own way. A transport subclass whose `#build_command` wraps the CLI in another program (`docker exec`, `ssh`) puts that local program in a group of its own; the option does not set the process group of a CLI on the far side. The Python SDK has no equivalent; the TypeScript SDK leaves it to a custom `spawnClaudeCodeProcess`.
 
 Your process now owns Ctrl-C. To stop a turn, call `Client#interrupt`, or `Client#disconnect` to end the session; a one-shot `query()` has no handle to interrupt. Neither may be called inside a signal trap: they take a mutex, and Ruby raises `ThreadError` (`can't be called from trap context`). Let the trap only record the signal, and make the call from ordinary code:
 
 ```ruby
 interrupts = Thread::Queue.new
-trap('INT') { interrupts << :int } # nothing else in here: no SDK calls
-
-options = ClaudeAgentSDK::ClaudeAgentOptions.new(process_group: true)
-ClaudeAgentSDK::Client.open(options: options) do |client|
-  watcher = Thread.new do
-    interrupts.pop
-    client.interrupt # on this thread, outside the trap
+previous = trap('INT') { interrupts << :int } # nothing else in here: no SDK calls
+begin
+  options = ClaudeAgentSDK::ClaudeAgentOptions.new(process_group: true)
+  ClaudeAgentSDK::Client.open(options: options) do |client|
+    watcher = Thread.new do
+      client.interrupt if interrupts.pop # on this thread, outside the trap
+    end
+    client.query('Refactor the parser')
+    client.receive_response { |message| puts message }
+  ensure
+    interrupts.close # pop returns nil, and the watcher ends
+    watcher&.join
   end
-  client.query('Refactor the parser')
-  client.receive_response { |message| puts message }
 ensure
-  watcher&.kill
+  trap('INT', previous) # Ctrl-C behaves as before once the session is over
 end
 ```
 

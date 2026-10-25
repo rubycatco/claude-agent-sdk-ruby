@@ -157,27 +157,45 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
         Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
-      def start_host(process_group:)
-        attributes = { cli_path: @cli, cwd: @dir, env: FakeClaude.env(log: @log), process_group: process_group }
+      # Starts the host and reads its first reply, the CLI's pid: recorded
+      # before anything that can hang, so the CLI is always cleaned up.
+      def start_host(process_group:, scenario: 'conversation', stall_before_ready: false)
+        config = { options: { cli_path: @cli, cwd: @dir, env: FakeClaude.env(scenario: scenario, log: @log),
+                              process_group: process_group },
+                   stall_before_ready: stall_before_ready }
         @host_err = File.join(@dir, 'host.err')
         @host_in, @host_out, @host = Open3.popen2(
           RbConfig.ruby, '-I', File.expand_path('../../lib', __dir__), '-r', 'claude_agent_sdk',
           '-r', File.expand_path('../support/process_group_host.rb', __dir__),
-          '-e', 'ProcessGroupHost.main(ARGV)', JSON.generate(attributes), pgroup: true, err: @host_err
+          '-e', 'ProcessGroupHost.main(ARGV)', JSON.generate(config), pgroup: true, err: @host_err
         )
+        spawned = host_says
+        expect(spawned).to include('event' => 'spawned')
+        @child_pid = spawned.fetch('child_pid')
       end
 
-      # The host's next reply, waited for against a deadline.
+      # The host's next reply. The whole line is read against one deadline:
+      # a host that stalls after part of a line fails here as surely as one
+      # that says nothing.
       def host_says(command = nil, seconds: 30)
         @host_in.puts(command) if command
         deadline = now + seconds
-        until @host_out.wait_readable([deadline - now, 0].max)
-          next if now < deadline
+        @host_buffer ||= +''
+        until (newline = @host_buffer.index("\n"))
+          remaining = deadline - now
+          raise "no reply from the host within #{seconds}s; its stderr: #{host_stderr}" unless remaining.positive?
+          next unless @host_out.wait_readable(remaining)
 
-          raise "no reply from the host within #{seconds}s; its stderr: #{File.read(@host_err)}"
+          chunk = @host_out.read_nonblock(4096, exception: false)
+          raise "the host closed its stdout mid-reply (#{@host_buffer.inspect}); its stderr: #{host_stderr}" unless chunk
+
+          @host_buffer << chunk unless chunk == :wait_readable
         end
-        line = @host_out.gets or raise "the host exited; its stderr: #{File.read(@host_err)}"
-        JSON.parse(line)
+        JSON.parse(@host_buffer.slice!(0..newline))
+      end
+
+      def host_stderr
+        @host_err && File.exist?(@host_err) ? File.read(@host_err) : ''
       end
 
       # Ready, and the groups are what the example is about: the host leads
@@ -186,27 +204,58 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
       def ready_host(process_group:)
         start_host(process_group: process_group)
         ready = host_says
-        @child_pid = ready.fetch('child_pid')
-        expect(ready).to include('event' => 'ready', 'trap' => true, 'host_pid' => @host.pid)
+        expect(ready).to include('event' => 'ready', 'trap' => true, 'host_pid' => @host.pid,
+                                 'child_pid' => @child_pid)
         expect(ready.fetch('host_pgid')).to eq(@host.pid)
         expect(ready.fetch('host_pgid')).not_to eq(Process.getpgrp)
         expect(ready.fetch('child_pgid')).to eq(process_group ? @child_pid : @host.pid)
         ready.fetch('host_pgid')
       end
 
-      after do
-        @host_in&.close
-        if @host
-          begin
-            Process.kill('KILL', -@host.pid)
-          rescue Errno::ESRCH
-            nil
-          end
-          @host.join(10)
-        end
-        # Out of the host's group when isolated: the KILL above misses it.
-        kill_fake_claude(@child_pid) if @child_pid
+      def alive?(pid)
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH, Errno::EPERM
+        false
       end
+
+      def kill(signal, pid)
+        Process.kill(signal, pid)
+      rescue Errno::ESRCH
+        nil
+      end
+
+      # Stops what start_host started, and fails unless both processes are
+      # gone. The host first gets a bounded chance to close its transport and
+      # exit on stdin EOF, which reaps the CLI; then its group is KILLed, and
+      # so is every CLI pid on record (the one the host reported, and those
+      # the fake logged), since an isolated CLI is out of the host's group.
+      # These are processes this example started moments ago, so a pid is
+      # only KILLed while it still leads its own group or is in the host's.
+      def stop_host(grace: 10)
+        host = @host or return
+        @host = nil
+        @host_in.close
+        unless host.join(grace)
+          kill('KILL', -host.pid)
+          raise 'the host is still running after SIGKILL' unless host.join(10)
+        end
+        @host_out.close
+        cli = [@child_pid, *FakeClaude.pids(@log)].compact.uniq
+        cli.each do |pid|
+          kill('KILL', pid) if [pid, host.pid].include?(Process.getpgid(pid))
+        rescue Errno::ESRCH
+          nil
+        end
+        deadline = now + 10
+        until (cli = cli.select { |pid| alive?(pid) }).empty?
+          raise "the CLI is still running after SIGKILL: #{cli.inspect}" if now > deadline
+
+          sleep 0.01 # polling for the reaper outside this process, against the deadline
+        end
+      end
+
+      after { stop_host }
 
       it 'leaves the CLI alive and answering, and the host with the signal' do
         host_pgid = ready_host(process_group: true)
@@ -226,6 +275,36 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
 
         expect(host_says('int?')).to include('received' => true)
         expect(host_says('waiter')).to include('exited' => true, 'termsig' => Signal.list.fetch('INT'))
+      end
+
+      # The cleanup above, when readiness never comes: a host that hangs
+      # without reading stdin, and an isolated CLI that ignores stdin EOF
+      # and SIGTERM. Neither may outlive the example.
+      it 'leaves no process behind when the host never gets ready' do
+        start_host(process_group: true, scenario: 'wedged', stall_before_ready: true)
+        host = @host
+        cli = @child_pid
+
+        expect { host_says(seconds: 1) }.to raise_error(/no reply from the host within 1s/)
+        stop_host(grace: 1)
+
+        expect(host.join(0)).to be(host)
+        expect(alive?(cli)).to be(false)
+      end
+
+      it 'bounds a reply that never comes, comes in part, or is cut off' do
+        [['', true], ['{"event":"ready"', true], ['{"event":"ready"', false]].each do |partial, keep_open|
+          @host_out, writer = IO.pipe
+          @host_buffer = nil
+          writer.write(partial)
+          writer.close unless keep_open
+
+          expect { bounded(5) { host_says(seconds: 0.2) } }
+            .to raise_error(keep_open ? /no reply from the host within 0.2s/ : /closed its stdout mid-reply/)
+        ensure
+          @host_out&.close
+          writer&.close
+        end
       end
     end
   end

@@ -263,7 +263,8 @@ module ClaudeAgentSDK
     # Applies to the CLI process the default transport starts for the
     # session (`pgroup: true` on Unix, `new_pgroup: true` on Windows), not to
     # the short `claude -v` version probe. SDK only: nothing is sent to the
-    # CLI. Not in the Python or TypeScript SDK.
+    # CLI. Ruby only: the Python SDK has no equivalent, and the TypeScript
+    # SDK leaves it to a custom `spawnClaudeCodeProcess`.
     #
     # Assigning coerces to a Boolean; {#process_group?} is the predicate
     # form.
