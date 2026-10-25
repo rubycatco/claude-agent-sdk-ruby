@@ -2238,7 +2238,7 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
         expect(connected(process_group: true).group_leader?(waiter)).to be(true)
         expect(connected(process_group: true).group_leader?(instance_double(Process::Waiter))).to be(false)
         expect(connected(process_group: false).group_leader?(waiter)).to be(false)
-        expect(described_class.new('hi', ClaudeAgentSDK::ClaudeAgentOptions.new).group_leader?(nil)).to be(false)
+        expect(described_class.new('hi', ClaudeAgentSDK::ClaudeAgentOptions.new(cli_path: '/usr/bin/claude')).group_leader?(nil)).to be(false)
       end
 
       it 'does not hold on Windows, where the spawn uses new_pgroup instead' do
