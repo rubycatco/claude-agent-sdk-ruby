@@ -373,6 +373,15 @@ module ClaudeAgentSDK
         # On Windows spawn raises for :uid, wrapped below into
         # CLIConnectionError — fail-loud instead of the old silent ignore.
         opts = { chdir: @cwd&.to_s, uid: @options.user }.compact
+        # process_group: the terminal's Ctrl-C signals the whole foreground
+        # process group, so a CLI left in ours ends the turn on its own
+        # before the host can choose to interrupt, ask, or ignore it. Its own
+        # group keeps that decision with the host. Teardown still signals
+        # the pid, not the group. Windows has no :pgroup; :new_pgroup
+        # (CREATE_NEW_PROCESS_GROUP) is its equivalent, and Unix rejects it.
+        # Absent unless set, like :uid. The `-v` probe is short-lived and
+        # bounded, and stays in our group.
+        opts[Gem.win_platform? ? :new_pgroup : :pgroup] = true if @options.process_group?
 
         @stdin, @stdout, @stderr, @process = Open3.popen3(process_env, *cmd, opts)
         # The CLI emits UTF-8 regardless of the parent locale. popen3 pipes

@@ -67,6 +67,7 @@ The SessionStore reference adapters under `examples/session_stores/`. The S3 one
 - **`scripted_cli.rb`** — `ScriptedCLI`, the CLI's end of the control protocol in process. `ScriptedCLI.session(options) { |cli, client| ... }` opens a real `Client` on it; `cli.request(...)` sends a control request (`hook_callback`, `can_use_tool`, `mcp_message`) and returns the control response the SDK wrote; `initialize` is answered the way CLI 2.1.286 answers it.
 - **`fake_claude.rb`** — `FakeClaude`, a stand-in for the `claude` executable: a plain-Ruby child process that speaks the stream-JSON protocol. `FakeClaude.install(dir)` writes the executable and returns its absolute path for `cli_path:`; `FakeClaude.env(scenario:, log:)` selects what the child does (a conversation, a slow exit after stdin EOF, a process that ignores EOF and SIGTERM, stderr lines followed by a failure, an immediate exit); `FakeClaude.events(log)` reads back what the child received and did.
 - **`callback_exit_harness.rb`** — `CallbackExitHarness`, the child-process side of `callback_process_exit_spec.rb`.
+- **`process_group_host.rb`** — `ProcessGroupHost`, the host process of the Ctrl-C examples in `subprocess_cli_transport_fake_cli_spec.rb` (`process_group`): it traps INT, runs a transport against `FakeClaude` and answers the spec's commands on stdin, one JSON line each.
 
 ## Conventions
 

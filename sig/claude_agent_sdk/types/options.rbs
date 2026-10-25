@@ -57,6 +57,7 @@ module ClaudeAgentSDK
                       ?can_use_tool: _CanUseTool?,
                       ?hooks: Hash[String | Symbol, Array[HookMatcher]?]?,
                       ?user: (String | Integer)?,
+                      ?process_group: bool?,
                       ?agents: Hash[String | Symbol, AgentDefinition | Hash[Symbol | String, untyped]]?,
                       ?setting_sources: Array[String]?,
                       ?skills: (String | Array[String])?,
@@ -157,6 +158,14 @@ module ClaudeAgentSDK
 
     # User (name or uid) to run the CLI process as.
     attr_accessor user: (String | Integer)?
+
+    # Start the CLI process in a process group of its own, so the terminal's
+    # Ctrl-C does not reach it (false by default).
+    attr_reader process_group: bool?
+
+    def process_group=: (untyped value) -> bool?
+
+    def process_group?: () -> bool
 
     attr_accessor agents: Hash[String | Symbol, AgentDefinition | Hash[Symbol | String, untyped]]?
 

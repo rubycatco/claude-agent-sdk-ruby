@@ -792,6 +792,32 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
       opts = connect_capturing_opts(ClaudeAgentSDK::ClaudeAgentOptions.new(cli_path: '/usr/bin/claude'))
       expect(opts).not_to have_key(:uid)
     end
+
+    describe 'process_group option (spawn :pgroup / :new_pgroup)' do
+      it 'passes pgroup: true when process_group is set' do
+        opts = connect_capturing_opts(ClaudeAgentSDK::ClaudeAgentOptions.new(cli_path: '/usr/bin/claude',
+                                                                             process_group: true))
+        expect(opts).to include(pgroup: true)
+        expect(opts).not_to have_key(:new_pgroup)
+      end
+
+      it 'passes neither key when process_group is left out, false or nil' do
+        [{}, { process_group: false }, { process_group: nil }].each do |setting|
+          opts = connect_capturing_opts(ClaudeAgentSDK::ClaudeAgentOptions.new(cli_path: '/usr/bin/claude', **setting))
+          expect(opts.keys).not_to include(:pgroup, :new_pgroup)
+        end
+      end
+
+      # Unix spawn rejects :new_pgroup (ArgumentError: wrong exec option
+      # symbol), so this only proves which key is chosen.
+      it 'passes new_pgroup: true instead on Windows' do
+        allow(Gem).to receive(:win_platform?).and_return(true)
+        opts = connect_capturing_opts(ClaudeAgentSDK::ClaudeAgentOptions.new(cli_path: '/usr/bin/claude',
+                                                                             process_group: true))
+        expect(opts).to include(new_pgroup: true)
+        expect(opts).not_to have_key(:pgroup)
+      end
+    end
   end
 
   describe 'OTel trace context propagation' do
