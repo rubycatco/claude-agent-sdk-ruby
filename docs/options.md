@@ -198,7 +198,7 @@ begin
     client.query('Refactor the parser')
     client.receive_response { |message| puts message }
   ensure
-    interrupts.close # pop returns nil, and the watcher ends
+    interrupts << nil # ends the watcher; the queue stays open for the trap
     watcher&.join
   end
 ensure
