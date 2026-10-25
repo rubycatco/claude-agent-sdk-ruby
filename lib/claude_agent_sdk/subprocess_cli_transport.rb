@@ -647,7 +647,13 @@ module ClaudeAgentSDK
           # SIGTERM didn't work — force kill
           begin
             kill_process_group(@process.pid) if group_leader?(@process)
-            Process.kill('KILL', @process.pid)
+            begin
+              Process.kill('KILL', @process.pid)
+            rescue Errno::ESRCH
+              # Already reaped: the group KILL just above reaches the CLI
+              # too, and its waiter can finish before this signal. Still
+              # wait for that waiter below, as the other KILL sites do.
+            end
             @process.value
           rescue StandardError => e
             raise if e.is_a?(Async::TimeoutError)

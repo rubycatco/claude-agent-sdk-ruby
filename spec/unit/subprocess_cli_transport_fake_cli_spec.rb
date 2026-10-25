@@ -323,12 +323,41 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
       # Every process the example started: KILLed by pid while its waiter
       # still holds it, then reaped, bounded.
       after do
-        @owned.each do |waiter|
-          Process.kill('KILL', waiter.pid) if waiter.alive?
-        rescue Errno::ESRCH
-          nil
-        end
+        @owned.each { |waiter| kill_by_waiter(waiter) }
         expect(@owned.reject { |waiter| waiter.join(10) }).to be_empty
+      end
+
+      # KILLs +waiter+'s process by pid while the waiter still holds it
+      # (until it has reaped the process, the pid is that process's).
+      def kill_by_waiter(waiter)
+        Process.kill('KILL', waiter.pid) if waiter.alive?
+      rescue Errno::ESRCH
+        nil
+      end
+
+      # #bounded for these examples, without a process-table lookup: every
+      # process they start is known by its waiter (the CLI's in @cli_waiter,
+      # the rest in @owned), so when the bound expires those are KILLed by
+      # pid, and the worker is joined, or killed, in an ensure that a
+      # failing signal cannot skip. (@cli is the fake's path, set by the
+      # file's around hook.)
+      def bounded_by_waiters(seconds = 60)
+        worker = Thread.new do
+          Thread.current.report_on_exception = false # the error is re-raised below, by #value
+          yield
+        end
+        return worker.value if worker.join(seconds)
+
+        raise "still running after #{seconds}s (the example's processes were killed to end it)"
+      ensure
+        if worker&.alive?
+          begin
+            [@cli_waiter, *@owned].compact.each { |waiter| kill_by_waiter(waiter) }
+          ensure
+            worker.kill unless worker.join(10)
+            worker.join(10)
+          end
+        end
       end
 
       def sigkill
@@ -368,7 +397,7 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
         allow(Process).to receive(:kill).and_wrap_original do |original, signal, target|
           @sent << [signal, target]
           result = original.call(signal, target)
-          @cli.join(30) if signal == 'KILL' && @cli && target == @cli.pid
+          @cli_waiter.join(30) if signal == 'KILL' && @cli_waiter && target == @cli_waiter.pid
           result
         end
       end
@@ -390,9 +419,9 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
       def connect_wedged(transport)
         transport.connect
         @sent.clear
-        @cli = transport.instance_variable_get(:@process)
-        expect(handshake(transport).dig(:response, :response, :pid)).to eq(@cli.pid)
-        @cli.pid
+        @cli_waiter = transport.instance_variable_get(:@process)
+        expect(handshake(transport).dig(:response, :response, :pid)).to eq(@cli_waiter.pid)
+        @cli_waiter.pid
       end
 
       # The cleanup of an example that failed before the SDK killed the CLI,
@@ -400,11 +429,11 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
       # else, so it is KILLed by pid while its waiter still holds it, and
       # the #close that follows has nothing left to wait for. Bounded.
       def stop_cli(transport)
-        Process.kill('KILL', @cli.pid) if @cli&.alive?
+        Process.kill('KILL', @cli_waiter.pid) if @cli_waiter&.alive?
       rescue Errno::ESRCH
         nil
       ensure
-        @cli&.join(10)
+        @cli_waiter&.join(10)
         transport&.close
       end
 
@@ -434,15 +463,15 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
           transport = transport_for(scenario: 'wedged', process_group: true)
           short_graces(transport)
 
-          bounded do
+          bounded_by_waiters do
             cli = connect_wedged(transport)
             member = spawn_owned(cli)
             kill_through(path, transport)
 
-            expect(termsig(@cli)).to eq(sigkill)
+            expect(termsig(@cli_waiter)).to eq(sigkill)
             expect(termsig(member)).to eq(sigkill)
             expect(@sent.first(3)).to eq([['TERM', cli], ['KILL', -cli], ['KILL', cli]])
-            expect(described_class.active_processes).not_to include(@cli)
+            expect(described_class.active_processes).not_to include(@cli_waiter)
           end
         ensure
           stop_cli(transport)
@@ -453,13 +482,13 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
         transport = transport_for(scenario: 'wedged')
         short_graces(transport)
 
-        bounded do
+        bounded_by_waiters do
           cli = connect_wedged(transport)
           member = spawn_owned(nil) # the CLI's group is ours
           expect(Process.getpgid(member.pid)).to eq(Process.getpgid(cli))
           transport.close
 
-          expect(termsig(@cli)).to eq(sigkill)
+          expect(termsig(@cli_waiter)).to eq(sigkill)
           expect(member.join(0.5)).to be_nil # still running; the after hook ends it
           expect(@sent).to eq([['TERM', cli], ['KILL', cli]])
         end
@@ -479,16 +508,16 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
             transport = transport_for(scenario: 'wedged', process_group: true)
             short_graces(transport)
 
-            bounded do
+            bounded_by_waiters do
               cli = connect_wedged(transport)
               member = spawn_owned(cli) if member_stays
               expect(fake_request(transport, 'fake_setpgid', pgid: elsewhere.pid)).to eq(pgid: elsewhere.pid)
               kill_through(path, transport)
 
-              expect(termsig(@cli)).to eq(sigkill)
+              expect(termsig(@cli_waiter)).to eq(sigkill)
               expect(termsig(member)).to eq(sigkill) if member_stays
               expect(@sent.first(3)).to eq([['TERM', cli], ['KILL', -cli], ['KILL', cli]])
-              expect(described_class.active_processes).not_to include(@cli)
+              expect(described_class.active_processes).not_to include(@cli_waiter)
             end
             expect(elsewhere).to be_alive # the group the CLI moved to was never signalled
           ensure
@@ -503,8 +532,9 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
         [true, false].each do |process_group|
           transport = transport_for(process_group: process_group)
 
-          bounded do
+          bounded_by_waiters do
             transport.connect
+            @cli_waiter = transport.instance_variable_get(:@process)
             cli = handshake(transport).dig(:response, :response, :pid)
             child = fake_request(transport, 'fake_spawn_child')
             expect(child.fetch(:pgid)).to eq(process_group ? cli : Process.getpgrp)

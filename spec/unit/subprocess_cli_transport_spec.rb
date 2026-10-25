@@ -2298,6 +2298,23 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
       end
     end
 
+    # The group KILL reaches the CLI too, and its waiter can reap it before
+    # the pid KILL that follows, which then raises ESRCH: a successful
+    # termination, waited for like any other, with no cleanup warning.
+    it 'teardown escalation still waits, silently, when the group KILL reaped the CLI before the pid KILL' do
+      transport = connected(process_group: true)
+      allow(Process).to receive(:kill).with('KILL', pid) do |signal, target|
+        signals << [signal, target]
+        raise Errno::ESRCH
+      end
+
+      close_through_kill(transport)
+
+      expect(signals).to eq([['TERM', pid], ['KILL', -pid], ['KILL', pid]])
+      expect(waiter).to have_received(:value)
+      expect(described_class.active_processes).not_to include(waiter)
+    end
+
     it 'leaves the at_exit reaper on SIGTERM to the pid' do
       connected(process_group: true)
 
