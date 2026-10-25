@@ -376,14 +376,21 @@ module ClaudeAgentSDK
         # process_group: the terminal's Ctrl-C signals the whole foreground
         # process group, so a CLI left in ours ends the turn on its own
         # before the host can choose to interrupt, ask, or ignore it. Its own
-        # group keeps that decision with the host. Teardown still signals
-        # the pid, not the group. Windows has no :pgroup; :new_pgroup
-        # (CREATE_NEW_PROCESS_GROUP) is its equivalent, and Unix rejects it.
-        # Absent unless set, like :uid. The `-v` probe is short-lived and
-        # bounded, and stays in our group.
+        # group keeps that decision with the host. SIGTERM still goes to the
+        # pid only; a SIGKILL also goes to the group (#kill_process_group).
+        # Windows has no :pgroup; :new_pgroup (CREATE_NEW_PROCESS_GROUP) is
+        # its equivalent, and Unix rejects it. Absent unless set, like :uid.
+        # The `-v` probe is short-lived and bounded, and stays in our group.
         opts[Gem.win_platform? ? :new_pgroup : :pgroup] = true if @options.process_group?
 
         @stdin, @stdout, @stderr, @process = Open3.popen3(process_env, *cmd, opts)
+        # Recorded from the spawn options themselves, on every spawn: only a
+        # process this line started with pgroup: true leads a group of its
+        # own (pgid == its pid). Kept by identity, so a KILL site asks about
+        # the waiter it holds, never the options, which can change after
+        # spawn. Not cleared by #close: a read loop still waiting on the
+        # same waiter must get the same answer.
+        @group_leader = opts[:pgroup] ? @process : nil
         # The CLI emits UTF-8 regardless of the parent locale. popen3 pipes
         # default to Encoding.default_external (US-ASCII under LANG=C/LC_ALL=C
         # — minimal Docker images, systemd, CI), which makes String#strip on
@@ -639,6 +646,7 @@ module ClaudeAgentSDK
         rescue Timeout::Error
           # SIGTERM didn't work — force kill
           begin
+            kill_process_group(@process.pid) if group_leader?(@process)
             Process.kill('KILL', @process.pid)
             @process.value
           rescue StandardError => e
@@ -670,9 +678,12 @@ module ClaudeAgentSDK
     # inside an ensure during fiber cancellation: synchronous SIGTERM now,
     # then a plain (non-reactor) thread escalates to SIGKILL after a grace
     # period. Open3's Process::Waiter thread keeps reaping, so no zombie is
-    # left either way. The alive? guard also makes the delayed KILL
-    # pid-reuse-safe: while the waiter thread reports alive (not yet reaped),
-    # the pid cannot have been recycled.
+    # left either way. The alive? guard before the delayed KILL is best
+    # effort: it narrows the window in which the pid could have been reaped
+    # and recycled, but does not close it — the waiter reports alive for a
+    # moment after its OS wait has reaped the child, and the child can be
+    # reaped between the check and the signal. The group KILL shares the
+    # pid KILL's check and instant, and so its window.
     #
     # @api private
     def force_terminate_in_background(process, grace_seconds: 2)
@@ -684,6 +695,8 @@ module ClaudeAgentSDK
       end
 
       pid = process.pid
+      # Captured now, on the caller's thread, for the KILL thread below.
+      kill_group = group_leader?(process)
       begin
         Process.kill('TERM', pid)
       rescue Errno::ESRCH
@@ -695,7 +708,10 @@ module ClaudeAgentSDK
       Thread.new do
         unless process.join(grace_seconds)
           begin
-            Process.kill('KILL', pid) if process.alive?
+            if process.alive?
+              kill_process_group(pid) if kill_group
+              Process.kill('KILL', pid)
+            end
           rescue Errno::ESRCH
             # Still wait for the waiter when exit raced the signal.
           end
@@ -738,6 +754,31 @@ module ClaudeAgentSDK
       true
     rescue Timeout::Error
       false
+    end
+
+    # Whether +process+ is the waiter #connect spawned with pgroup: true,
+    # i.e. the leader of a process group of its own, with the pid as pgid.
+    #
+    # @api private
+    def group_leader?(process)
+      !process.nil? && @group_leader.equal?(process)
+    end
+
+    # SIGKILL to the process group the CLI was spawned to lead, sent just
+    # before every SIGKILL of the CLI itself (process_group: true only), so
+    # its children still in that group die with it instead of outliving a
+    # CLI that never got to stop them. SIGTERM stays on the pid: the CLI
+    # stops its children itself on TERM, in its own order. Group first, so
+    # the still-running CLI keeps the group id in use at the signal. Best
+    # effort, and it proves nothing about the CLI: the group can be empty
+    # (ESRCH) or still hold other members after the CLI left it, so the pid
+    # KILL that follows, its waits and its error handling stay as they are.
+    #
+    # @api private
+    def kill_process_group(pgid)
+      Process.kill('KILL', -pgid)
+    rescue Errno::ESRCH, Errno::EPERM
+      nil
     end
 
     def write(data)
@@ -894,6 +935,7 @@ module ClaudeAgentSDK
       # double-wait). Both are non-fatal — the message loop just exits.
       # Snapshot: a concurrent close() nils @process mid-wait.
       process = @process
+      kill_group = group_leader?(process)
       returncode = nil
       termsig = nil
       forced_exit = false
@@ -910,6 +952,7 @@ module ClaudeAgentSDK
           begin
             Process.kill('TERM', process.pid)
             unless process_exited_within?(process, EOF_TERM_GRACE_SECONDS)
+              kill_process_group(process.pid) if kill_group
               Process.kill('KILL', process.pid)
               # Even KILL can't reap a child stuck in uninterruptible kernel
               # I/O; bound this last wait too rather than block on #value.

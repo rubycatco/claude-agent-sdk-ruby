@@ -307,6 +307,216 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
         end
       end
     end
+
+    # Every SIGKILL the SDK sends a CLI started with process_group goes to
+    # its process group first; SIGTERM stays on the pid. The processes put
+    # in the CLI's group here are the example's own (spawned into it by
+    # pid), and their waiters reap them, so how each one ended is read from
+    # its own wait status, never from a signal 0 to a pid someone else
+    # reaps.
+    describe 'SIGKILL to the CLI process group' do
+      before do
+        @owned = []
+        @sent = []
+      end
+
+      # Every process the example started: KILLed by pid while its waiter
+      # still holds it, then reaped, bounded.
+      after do
+        @owned.each do |waiter|
+          Process.kill('KILL', waiter.pid) if waiter.alive?
+        rescue Errno::ESRCH
+          nil
+        end
+        expect(@owned.reject { |waiter| waiter.join(10) }).to be_empty
+      end
+
+      def sigkill
+        Signal.list.fetch('KILL')
+      end
+
+      # A process the example owns, in process group +pgroup+ (true: one of
+      # its own; nil: ours), that ignores SIGTERM and never reads its stdin:
+      # only SIGKILL ends it. Recorded before anything can fail; returned
+      # (its waiter) once its trap is in place.
+      def spawn_owned(pgroup)
+        reader, writer = IO.pipe
+        pid = Process.spawn({ 'RUBYOPT' => nil, 'RUBYLIB' => nil }, RbConfig.ruby, '--disable-gems', '-e',
+                            "trap('TERM', 'IGNORE'); STDOUT.sync = true; puts 'ready'; sleep",
+                            in: File::NULL, out: writer, pgroup: pgroup)
+        @owned << (waiter = Process.detach(pid))
+        writer.close
+        expect(reader.wait_readable(30) && reader.gets).to eq("ready\n")
+        waiter
+      ensure
+        [reader, writer].each { |io| io&.close unless io&.closed? }
+      end
+
+      # How +waiter+'s process ended: the signal that killed it, if any.
+      def termsig(waiter)
+        waiter.join(30)&.value&.termsig
+      end
+
+      # The graces that have to lapse (the CLI ignores stdin EOF and SIGTERM)
+      # shrink to a fraction of a second; the polling is the real one. A KILL
+      # of the CLI's pid returns once the CLI is reaped, so the bounded wait
+      # after it cannot lapse on a slow machine. Every signal is recorded.
+      def short_graces(transport)
+        allow(transport).to receive(:wait_process_with_timeout).and_wrap_original do |original, seconds, *rest|
+          original.call([seconds, 0.3].min, *rest)
+        end
+        allow(Process).to receive(:kill).and_wrap_original do |original, signal, target|
+          @sent << [signal, target]
+          result = original.call(signal, target)
+          @cli.join(30) if signal == 'KILL' && @cli && target == @cli.pid
+          result
+        end
+      end
+
+      # A fake_* control request (spec/support/fake_claude.rb); its answer.
+      def fake_request(transport, subtype, **fields)
+        id = "req_#{subtype}"
+        transport.write("#{JSON.generate(type: 'control_request', request_id: id,
+                                         request: { subtype: subtype, **fields })}\n")
+        answer = transport.read_messages { |frame| break frame }
+        expect(answer.dig(:response, :request_id)).to eq(id)
+        answer.dig(:response, :response)
+      end
+
+      # Connects to a wedged fake (it ignores stdin EOF and SIGTERM) and
+      # returns its pid, with the CLI's waiter kept for the cleanup. The
+      # signals recorded so far are dropped: #connect's `-v` probe gets a
+      # TERM when its waiter has not reaped it yet, which is not teardown.
+      def connect_wedged(transport)
+        transport.connect
+        @sent.clear
+        @cli = transport.instance_variable_get(:@process)
+        expect(handshake(transport).dig(:response, :response, :pid)).to eq(@cli.pid)
+        @cli.pid
+      end
+
+      # The cleanup of an example that failed before the SDK killed the CLI,
+      # or with an SDK that never does: the wedged CLI ignores everything
+      # else, so it is KILLed by pid while its waiter still holds it, and
+      # the #close that follows has nothing left to wait for. Bounded.
+      def stop_cli(transport)
+        Process.kill('KILL', @cli.pid) if @cli&.alive?
+      rescue Errno::ESRCH
+        nil
+      ensure
+        @cli&.join(10)
+        transport&.close
+      end
+
+      # Takes the transport to a SIGKILL of the CLI on +path+: #close's
+      # escalation, the read loop's wait after the CLI let go of stdout, or
+      # the fallback of a #close cancelled before its escalation.
+      def kill_through(path, transport)
+        case path
+        when :close then transport.close
+        when :stdout_eof
+          fake_request(transport, 'fake_close_stdout')
+          expect { transport.read_messages { |_frame| nil } }
+            .to raise_error(ClaudeAgentSDK::ProcessError, /terminated by the SDK with signal #{sigkill}/)
+        when :cancelled_close
+          allow(transport).to receive(:teardown_process).and_raise(Async::Stop)
+          worker = nil
+          allow(transport).to receive(:force_terminate_in_background).and_wrap_original do |original, process|
+            worker = original.call(process, grace_seconds: 0.3)
+          end
+          expect { transport.close }.to raise_error(Async::Stop)
+          expect(worker.join(30)).not_to be_nil
+        end
+      end
+
+      %i[close stdout_eof cancelled_close].each do |path|
+        it "reaches a process in the CLI's group that ignores SIGTERM (#{path})" do
+          transport = transport_for(scenario: 'wedged', process_group: true)
+          short_graces(transport)
+
+          bounded do
+            cli = connect_wedged(transport)
+            member = spawn_owned(cli)
+            kill_through(path, transport)
+
+            expect(termsig(@cli)).to eq(sigkill)
+            expect(termsig(member)).to eq(sigkill)
+            expect(@sent.first(3)).to eq([['TERM', cli], ['KILL', -cli], ['KILL', cli]])
+            expect(described_class.active_processes).not_to include(@cli)
+          end
+        ensure
+          stop_cli(transport)
+        end
+      end
+
+      it 'leaves a process in the CLI group running without the option' do
+        transport = transport_for(scenario: 'wedged')
+        short_graces(transport)
+
+        bounded do
+          cli = connect_wedged(transport)
+          member = spawn_owned(nil) # the CLI's group is ours
+          expect(Process.getpgid(member.pid)).to eq(Process.getpgid(cli))
+          transport.close
+
+          expect(termsig(@cli)).to eq(sigkill)
+          expect(member.join(0.5)).to be_nil # still running; the after hook ends it
+          expect(@sent).to eq([['TERM', cli], ['KILL', cli]])
+        end
+      ensure
+        stop_cli(transport)
+      end
+
+      # A CLI may leave the group it was started in. The group KILL then
+      # finds that group empty (ESRCH), or kills only what is left in it, and
+      # the CLI itself is still KILLed by pid and waited for. It moves into a
+      # group the example owns, never into ours.
+      %i[close stdout_eof cancelled_close].each do |path|
+        [false, true].each do |member_stays|
+          left = member_stays ? 'still holds a process' : 'is empty'
+          it "KILLs and reaps a CLI that left its group, when that group #{left} (#{path})" do
+            elsewhere = spawn_owned(true)
+            transport = transport_for(scenario: 'wedged', process_group: true)
+            short_graces(transport)
+
+            bounded do
+              cli = connect_wedged(transport)
+              member = spawn_owned(cli) if member_stays
+              expect(fake_request(transport, 'fake_setpgid', pgid: elsewhere.pid)).to eq(pgid: elsewhere.pid)
+              kill_through(path, transport)
+
+              expect(termsig(@cli)).to eq(sigkill)
+              expect(termsig(member)).to eq(sigkill) if member_stays
+              expect(@sent.first(3)).to eq([['TERM', cli], ['KILL', -cli], ['KILL', cli]])
+              expect(described_class.active_processes).not_to include(@cli)
+            end
+            expect(elsewhere).to be_alive # the group the CLI moved to was never signalled
+          ensure
+            stop_cli(transport)
+          end
+        end
+      end
+
+      # What the group KILL is for: the CLI's own children start in its
+      # group. The fake reaps its child itself, at stdin EOF.
+      it "starts the CLI's children in the CLI's group, and in ours without the option" do
+        [true, false].each do |process_group|
+          transport = transport_for(process_group: process_group)
+
+          bounded do
+            transport.connect
+            cli = handshake(transport).dig(:response, :response, :pid)
+            child = fake_request(transport, 'fake_spawn_child')
+            expect(child.fetch(:pgid)).to eq(process_group ? cli : Process.getpgrp)
+            transport.close
+          end
+
+          expect(events.last(2)).to match([include('event' => 'eof'), include('event' => 'exit', 'status' => 0)])
+        ensure
+          transport&.close
+        end
+      end
+    end
   end
 
   describe '#close' do

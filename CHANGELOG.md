@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`process_group: true`: a SIGKILL the SDK sends the CLI also goes to the CLI's process group.** A wedged CLI that the SDK had to kill could not stop its own children, so one still in its group that ignores stdin EOF (a stdio MCP server, for instance) kept running after the session; before `process_group` it would at least have got the terminal's Ctrl-C. The group SIGKILL goes out just before the SIGKILL of the CLI itself, whenever the SDK sends one (a normal teardown after its grace periods and SIGTERM, a cancelled teardown after its short grace, or a CLI that closed stdout and hung), and adds no delay. SIGTERM, including the one sent at interpreter exit, still goes to the CLI process only, so the CLI's own cleanup of its children still runs; a CLI that exits on SIGTERM or on its own gets no group signal, and processes that left its group are not reached. Only sessions with `process_group: true` on Unix are affected. This narrows what 1.4.0 documented ("the SDK still signals the CLI process, not its group"). See [`docs/options.md`](docs/options.md#process_group).
+
 ## [1.4.0] - 2026-10-25
 
 ### Added

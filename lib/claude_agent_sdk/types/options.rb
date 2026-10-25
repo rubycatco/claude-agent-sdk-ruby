@@ -260,6 +260,13 @@ module ClaudeAgentSDK
     # {Client#interrupt} or {Client#disconnect}, called from ordinary code,
     # never from inside a signal trap.
     #
+    # Teardown still sends SIGTERM to the CLI process only, so the CLI can
+    # stop its own children in order. Whenever the SDK has to SIGKILL the
+    # CLI (it is still running after the teardown's graces and SIGTERM, or a
+    # cancelled teardown's short grace), that SIGKILL also goes to the CLI's
+    # process group, so processes still in it die with the CLI instead of
+    # outliving it. Unix only; see docs/options.md for the limits.
+    #
     # Applies to the CLI process the default transport starts for the
     # session (`pgroup: true` on Unix, `new_pgroup: true` on Windows), not to
     # the short `claude -v` version probe. SDK only: nothing is sent to the
