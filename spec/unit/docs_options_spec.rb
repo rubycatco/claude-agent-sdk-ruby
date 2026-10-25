@@ -86,6 +86,7 @@ RSpec.describe 'docs/options.md' do
       'cwd' => [{ cwd: '/srv/app' }],
       'env' => [{ env: { 'ANTHROPIC_BASE_URL' => 'https://proxy.example.com' } }],
       'user' => [{ user: 'deploy' }],
+      'process_group' => [{ process_group: true }],
       # The flag names are the caller's; the page writes them as `--<flag>`.
       'extra_args' => [{ extra_args: { 'any-flag' => 'value', 'any-switch' => nil } }],
       'stderr' => [{ stderr: callback }],

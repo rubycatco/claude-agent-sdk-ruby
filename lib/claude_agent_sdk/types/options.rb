@@ -84,6 +84,7 @@ module ClaudeAgentSDK
       self.strict_mcp_config = false
       self.forward_subagent_text = false
       self.verbatim_prompts = false
+      self.process_group = false
 
       super(merge_with_defaults(attributes || {}))
 
@@ -245,6 +246,39 @@ module ClaudeAgentSDK
     # @see #verbatim_prompts
     def verbatim_prompts=(value)
       @verbatim_prompts = coerce_boolean(value)
+    end
+
+    # Start the CLI process in a process group of its own. Defaults to
+    # `false`.
+    #
+    # In a terminal, Ctrl-C sends SIGINT to the whole foreground process
+    # group, and the CLI is in your process's group unless this is set: it
+    # ends the turn on its own at the same moment your process sees the
+    # signal, before you can decide what to do about it. When true, the
+    # terminal's SIGINT no longer reaches the CLI (nor the processes it
+    # starts in its own group), and stopping a turn is up to you:
+    # {Client#interrupt} or {Client#disconnect}, called from ordinary code,
+    # never from inside a signal trap.
+    #
+    # Applies to the CLI process the default transport starts for the
+    # session (`pgroup: true` on Unix, `new_pgroup: true` on Windows), not to
+    # the short `claude -v` version probe. SDK only: nothing is sent to the
+    # CLI. Not in the Python or TypeScript SDK.
+    #
+    # Assigning coerces to a Boolean; {#process_group?} is the predicate
+    # form.
+    #
+    # @return [Boolean]
+    attr_reader :process_group
+
+    # @return [Boolean] {#process_group}, as a strict Boolean.
+    def process_group?
+      !!process_group
+    end
+
+    # @see #process_group
+    def process_group=(value)
+      @process_group = coerce_boolean(value)
     end
 
     # Request model-generated progress summaries for subagent (`local_agent`)

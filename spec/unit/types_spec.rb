@@ -956,6 +956,38 @@ RSpec.describe ClaudeAgentSDK do
         expect(options.forward_subagent_text?).to eq(true)
       end
 
+      describe 'process_group' do
+        after { ClaudeAgentSDK.reset_configuration }
+
+        it 'defaults to false, keeps an explicit nil, and coerces like the other Booleans' do
+          expect(described_class.new.process_group).to be(false)
+          expect(described_class.new(process_group: nil).process_group).to be_nil
+          expect(described_class.new(process_group: nil).process_group?).to be(false)
+          expect(described_class.new(process_group: true).process_group?).to be(true)
+          ['false', 'off', 0].each do |value|
+            expect(described_class.new(process_group: value).process_group).to be(false)
+          end
+          expect(described_class.new('processGroup' => 'true').process_group).to be(true)
+        end
+
+        it 'lets a configured true win over an omitted value and a nil, and an explicit false override it' do
+          ClaudeAgentSDK.configure { |config| config.default_options = { process_group: true } }
+
+          expect(described_class.new.process_group).to be(true)
+          expect(described_class.new(process_group: nil).process_group).to be(true)
+          expect(described_class.new(process_group: false).process_group).to be(false)
+        end
+
+        it 'is changed and cleared on a dup_with copy only' do
+          base = described_class.new(process_group: true)
+
+          expect(base.dup_with(process_group: nil).process_group).to be_nil
+          expect(base.dup_with(process_group: false).process_group?).to be(false)
+          expect(base.dup_with(model: 'opus').process_group).to be(true)
+          expect(base.process_group).to be(true)
+        end
+      end
+
       it 'accepts configuration' do
         options = described_class.new(
           allowed_tools: %w[Read Write],

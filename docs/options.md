@@ -170,12 +170,52 @@ Guides: [Vendoring the CLI](cli-installer.md), [Custom Transport](client.md#cust
 | `cwd` | `String \| Pathname` | `nil` | The working directory of the CLI process (and its `PWD`) |
 | `env` | `Hash[String \| Symbol, String?]` | `{}` | Merged over the environment the CLI process inherits. A `nil` value unsets the variable |
 | `user` | `String \| Integer` | `nil` | The user the CLI process runs as (name or uid; Unix, and the SDK process needs the privilege to switch) |
+| `process_group` | `bool` | `false`; explicit `nil` stays `nil` | Nothing (SDK only): the CLI process starts in a process group of its own, out of reach of the terminal's Ctrl-C. See [`process_group`](#process_group) |
 | `extra_args` | `Hash[String \| Symbol, untyped]` | `{}` | `--<flag> <value>` per pair, `--<flag>` for a `nil` value. See [`extra_args`](#extra_args) |
 | `stderr` | `_StderrCallback` | `nil` | Nothing (SDK only): called with each line the CLI writes to stderr |
 | `debug_stderr` | `_Puts \| String` | `nil` | Nothing (SDK only): an IO-like object (`puts`) or a file path that receives each CLI stderr line |
 | `max_buffer_size` | `Integer` | `nil` | Nothing (SDK only): the largest single message, in bytes, accepted from the CLI. `nil` means 1 MiB |
 
 These options describe the process the SDK starts itself. A [custom transport](client.md#custom-transport) starts the CLI its own way and decides what to do with them.
+
+### `process_group`
+
+In a terminal, Ctrl-C sends SIGINT to every process of the foreground process group. The CLI is in your process's group, so it gets the signal at the same moment your process does and ends the turn on its own, before your code can decide what to do: interrupt and keep the partial reply, ask whether to stop, or ignore the keypress. With `process_group: true` the CLI process the SDK starts for the session begins in a process group of its own, and the terminal's SIGINT no longer reaches it, nor the processes it starts that stay in its group (Bash tool commands, stdio MCP servers). The short `claude -v` version check that runs before it stays in your group.
+
+It applies to `query()` and `Client` alike, on the default transport. A [custom transport](client.md#custom-transport) starts the CLI its own way. A transport subclass whose `#build_command` wraps the CLI in another program (`docker exec`, `ssh`) puts that local program in a group of its own; the option does not set the process group of a CLI on the far side. This option is in neither the Python nor the TypeScript SDK.
+
+Your process now owns Ctrl-C. To stop a turn, call `Client#interrupt`, or `Client#disconnect` to end the session; a one-shot `query()` has no handle to interrupt. Neither may be called inside a signal trap: they take a mutex, and Ruby raises `ThreadError` (`can't be called from trap context`). Let the trap only record the signal, and make the call from ordinary code:
+
+```ruby
+interrupts = Thread::Queue.new
+trap('INT') { interrupts << :int } # nothing else in here: no SDK calls
+
+options = ClaudeAgentSDK::ClaudeAgentOptions.new(process_group: true)
+ClaudeAgentSDK::Client.open(options: options) do |client|
+  watcher = Thread.new do
+    interrupts.pop
+    client.interrupt # on this thread, outside the trap
+  end
+  client.query('Refactor the parser')
+  client.receive_response { |message| puts message }
+ensure
+  watcher&.kill
+end
+```
+
+A plain script that does not trap INT is no worse off: Ctrl-C still raises `Interrupt` in your process, and the SDK's teardown stops the CLI as it does on any other exception.
+
+When the CLI process stops:
+
+- On `Client#disconnect`, or at the end of a `Client.open` block or a `query()` call, the usual teardown runs: the SDK closes the CLI's stdin, gives it a grace period to finish, then sends SIGTERM and finally SIGKILL.
+- When the interpreter exits normally without a disconnect, an `at_exit` handler sends SIGTERM to the CLI process. Best effort: it does not wait for the turn.
+- When your process dies abruptly (`exit!`, SIGKILL), the SDK cleans up nothing. The CLI sees its stdin close, which normally lets it wind down; how soon is up to the CLI and its background work (see [`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`](#claude_code_print_bg_wait_ceiling_ms)).
+
+In every case the SDK signals the CLI process only, not its group. The processes the CLI starts are its own to stop, and with the option on they no longer get the terminal's SIGINT either.
+
+The CLI's group is a background group of the terminal. A process in it that reads from the controlling terminal (a tool command that prompts on the tty) is stopped with SIGTTIN, and so is the rest of the group, the CLI included when the tool shares its group. Whether writing to the terminal stops it too depends on the terminal's TOSTOP setting. The SDK's own traffic with the CLI goes through pipes and is unaffected.
+
+On Windows the option starts the CLI with `new_pgroup: true` (`CREATE_NEW_PROCESS_GROUP`), which also turns Ctrl-C off for the CLI process. It has not been exercised on Windows.
 
 ### `extra_args`
 

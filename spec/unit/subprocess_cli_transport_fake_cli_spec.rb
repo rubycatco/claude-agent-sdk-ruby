@@ -55,7 +55,8 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
   end
 
   # The first exchange of every session, and proof that the child is up and
-  # reading: the `initialize` request the SDK sends, and the child's answer.
+  # reading: the `initialize` request the SDK sends, and the child's answer,
+  # which is returned.
   def handshake(transport)
     request = { type: 'control_request', request_id: 'req_1_0a1b2c3d',
                 request: { subtype: 'initialize', hooks: nil, agents: nil } }
@@ -63,6 +64,7 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
     answer = transport.read_messages { |frame| break frame }
     expect(answer).to include(type: 'control_response')
     expect(answer.dig(:response, :request_id)).to eq('req_1_0a1b2c3d')
+    answer
   end
 
   def events
@@ -118,6 +120,113 @@ RSpec.describe ClaudeAgentSDK::SubprocessCLITransport do
       expect(events).to be_empty # the child was never started
     ensure
       transport&.close
+    end
+  end
+
+  # Issue #175. A terminal's Ctrl-C signals the whole foreground process
+  # group; with process_group the CLI is out of it.
+  describe 'process_group' do
+    before { skip 'process groups are exercised on Unix only' if Gem.win_platform? }
+
+    def child_pgid(process_group:)
+      transport = transport_for(process_group: process_group)
+      bounded do
+        transport.connect
+        pid = handshake(transport).dig(:response, :response, :pid)
+        [pid, Process.getpgid(pid)] # while the child is alive
+      end
+    ensure
+      transport&.close
+    end
+
+    it 'starts the CLI as the leader of a process group of its own, and in ours without it' do
+      pid, pgid = child_pgid(process_group: true)
+      expect(pgid).to eq(pid)
+      expect(pgid).not_to eq(Process.getpgrp)
+
+      _, pgid = child_pgid(process_group: false)
+      expect(pgid).to eq(Process.getpgrp)
+    end
+
+    # The keypress itself, played for real: a host process that leads a group
+    # of its own, as a shell's foreground job does, traps INT and runs the
+    # transport against the fake CLI (spec/support/process_group_host.rb).
+    # The example signals the host's whole group, as the terminal does.
+    describe 'a Ctrl-C to the host process group' do
+      def now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def start_host(process_group:)
+        attributes = { cli_path: @cli, cwd: @dir, env: FakeClaude.env(log: @log), process_group: process_group }
+        @host_err = File.join(@dir, 'host.err')
+        @host_in, @host_out, @host = Open3.popen2(
+          RbConfig.ruby, '-I', File.expand_path('../../lib', __dir__), '-r', 'claude_agent_sdk',
+          '-r', File.expand_path('../support/process_group_host.rb', __dir__),
+          '-e', 'ProcessGroupHost.main(ARGV)', JSON.generate(attributes), pgroup: true, err: @host_err
+        )
+      end
+
+      # The host's next reply, waited for against a deadline.
+      def host_says(command = nil, seconds: 30)
+        @host_in.puts(command) if command
+        deadline = now + seconds
+        until @host_out.wait_readable([deadline - now, 0].max)
+          next if now < deadline
+
+          raise "no reply from the host within #{seconds}s; its stderr: #{File.read(@host_err)}"
+        end
+        line = @host_out.gets or raise "the host exited; its stderr: #{File.read(@host_err)}"
+        JSON.parse(line)
+      end
+
+      # Ready, and the groups are what the example is about: the host leads
+      # one that is not ours (so the signal below cannot reach rspec), and
+      # the CLI is in the expected one.
+      def ready_host(process_group:)
+        start_host(process_group: process_group)
+        ready = host_says
+        @child_pid = ready.fetch('child_pid')
+        expect(ready).to include('event' => 'ready', 'trap' => true, 'host_pid' => @host.pid)
+        expect(ready.fetch('host_pgid')).to eq(@host.pid)
+        expect(ready.fetch('host_pgid')).not_to eq(Process.getpgrp)
+        expect(ready.fetch('child_pgid')).to eq(process_group ? @child_pid : @host.pid)
+        ready.fetch('host_pgid')
+      end
+
+      after do
+        @host_in&.close
+        if @host
+          begin
+            Process.kill('KILL', -@host.pid)
+          rescue Errno::ESRCH
+            nil
+          end
+          @host.join(10)
+        end
+        # Out of the host's group when isolated: the KILL above misses it.
+        kill_fake_claude(@child_pid) if @child_pid
+      end
+
+      it 'leaves the CLI alive and answering, and the host with the signal' do
+        host_pgid = ready_host(process_group: true)
+
+        Process.kill('INT', -host_pgid)
+
+        expect(host_says('int?')).to include('received' => true)
+        expect(host_says('ping').fetch('response')).to include(
+          'type' => 'control_response', 'response' => include('request_id' => ProcessGroupHost::PING_ID)
+        )
+      end
+
+      it 'kills the CLI with SIGINT along with the host without the option' do
+        host_pgid = ready_host(process_group: false)
+
+        Process.kill('INT', -host_pgid)
+
+        expect(host_says('int?')).to include('received' => true)
+        expect(host_says('waiter')).to include('exited' => true, 'termsig' => Signal.list.fetch('INT'))
+      end
     end
   end
 

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`ClaudeAgentOptions#process_group`** starts the CLI process in a process group of its own (issue #175). In a terminal, Ctrl-C signals the whole foreground process group, so the CLI used to get the SIGINT along with your process and end the turn on its own before your code could decide what to do. With `process_group: true` the terminal's Ctrl-C no longer reaches the CLI, and your process owns it: call `Client#interrupt` or `disconnect` from ordinary code (not from inside the signal trap, where Ruby raises `ThreadError`). Off by default, so nothing changes unless you set it. Sends nothing to the CLI; uses `pgroup: true` on Unix and `new_pgroup: true` on Windows, where it is untested. Teardown is unchanged: the SDK still signals the CLI process, not its group. Ruby only: the Python SDK's equivalent (PR #617) is unmerged as of 2026-10-25. [`docs/options.md`](docs/options.md#process_group) covers the trap pattern, when the CLI stops, and the background-group caveat for tools that read the terminal.
+
 ### Changed
 - README: the Claude Code overview link (it led to a "Page not found" page) and the built-in tools link now point at `code.claude.com`. "Rails in a minute" is a section of its own after the Quick Start, and its job turns off auto-memory (`CLAUDE_CODE_DISABLE_AUTO_MEMORY`) as the Rails guide's does. The hooks example defines the two callbacks it passes, the custom-tool example runs a prompt, and the Examples table lists `subagent_status_example.rb`. What a session without credentials, or with a rejected key, returns is now described in a new "Authentication Failures" section of `docs/errors.md`.
 

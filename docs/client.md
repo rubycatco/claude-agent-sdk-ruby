@@ -64,6 +64,8 @@ ClaudeAgentSDK::Client.open do |client|
 end
 ```
 
+To handle Ctrl-C yourself in a terminal app (call `interrupt`, ask, or ignore it) rather than have it stop the CLI too, see [`process_group`](options.md#process_group).
+
 The Ruby-style names above sit next to the Python SDK's spellings, and both work, so code ported from the Python docs runs unchanged:
 
 | Ruby style | Python-parity name |
