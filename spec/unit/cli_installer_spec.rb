@@ -481,6 +481,26 @@ RSpec.describe ClaudeAgentSDK::CLIInstaller do
       expect(File.binread(target)).to eq('abcdef')
     end
 
+    # Issue #177: Rails sets default_internal to UTF-8, and a text-mode file
+    # transcodes each write. File::BINARY is 0 outside Windows.
+    it 'writes the bytes unchanged when Encoding.default_internal is set' do
+      payload = "\xB7\x00\xFF\xCF".b
+      stub_response(payload[0, 2], payload[2, 2])
+      target = File.join(tmp_dir, 'binary')
+      saved = Encoding.default_internal
+      verbose = $VERBOSE
+      $VERBOSE = nil # the setter warns under -W
+
+      begin
+        Encoding.default_internal = Encoding::UTF_8
+        expect(http.download_to('https://example.com/claude', target)).to eq(target)
+      ensure
+        Encoding.default_internal = saved
+        $VERBOSE = verbose
+      end
+      expect(File.binread(target)).to eq(payload)
+    end
+
     it 'aborts mid-stream once max_bytes is exceeded' do
       stub_response('a' * 4, 'b' * 4)
       target = File.join(tmp_dir, 'too-big')
