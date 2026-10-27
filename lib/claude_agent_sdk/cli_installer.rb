@@ -178,10 +178,15 @@ module ClaudeAgentSDK
         # place, and a rename only orders metadata. Without the sync, a power
         # loss shortly after an install could leave the published name
         # pointing at an empty or partial file.
+        #
+        # binmode, not File::BINARY: that flag is 0 outside Windows, so the
+        # file would be in text mode, and with Encoding.default_internal set
+        # (Rails sets it to UTF-8) every write would transcode the binary
+        # chunks and raise on the first byte that is not valid UTF-8 (#177).
         def download_to(url, path, max_bytes: nil)
           with_response(url) do |response|
             written = 0
-            File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::BINARY, 0o600) do |file|
+            File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600, binmode: true) do |file|
               response.read_body do |chunk|
                 written += chunk.bytesize
                 if over?(written, max_bytes)
