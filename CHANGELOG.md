@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-10-27
+
 ### Fixed
 - **`bin/rails claude_agent_sdk:install_cli` (and `CLIInstaller.install` whenever `Encoding.default_internal` is set) no longer fails with `Encoding::UndefinedConversionError`** (issue #177). The download was opened with `File::BINARY`, which is 0 outside Windows, so the file was in text mode; Rails sets `default_internal` to UTF-8, and each write then transcoded the binary chunks and raised on the first byte that is not valid UTF-8. The file is now opened with `binmode: true`.
 
