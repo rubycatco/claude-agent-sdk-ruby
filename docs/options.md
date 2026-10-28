@@ -158,7 +158,7 @@ Asks the CLI for partial message chunks while the model is still producing a mes
 
 ### `include_hook_events`
 
-Asks the CLI to put all hook lifecycle events into the message stream, as `HookStartedMessage`, `HookProgressMessage` and `HookResponseMessage` (see [System and progress messages](types.md#system-and-progress-messages)). It only adds messages: the callbacks you register with `hooks` are called whether or not it is set.
+Asks the CLI to put all hook lifecycle events into the message stream, as `HookStartedMessage`, `HookProgressMessage` and `HookResponseMessage` (see [System and progress messages](types.md#system-and-progress-messages)). It only adds messages: the callbacks you register with `hooks` are called whether or not it is set. It does not turn any off either: the CLI sends the events of `SessionStart` and `Setup` hooks whether or not it is set.
 
 ## The CLI process
 

@@ -2037,25 +2037,29 @@ module ClaudeAgentSDK
       %w[user assistant].include?(entry['type']) && !off_main_conversation?(entry)
     end
 
-    # Put the results of parallel tool calls back on a leaf-to-root chain.
+    # Put the tool calls and results of parallel tool calls back on a
+    # leaf-to-root chain.
     #
-    # The CLI writes one assistant entry per tool_use block (chained through
-    # parentUuid) and parents every tool_result on the entry that holds ITS
-    # tool_use. With two or more calls in one API message, only the result
-    # the conversation continued from is an ancestor of the leaf; the others
-    # are siblings of the next tool_use entry, and a single-path walk returns
-    # their tool_use without them.
+    # The CLI writes one assistant entry per content block (they share
+    # message.id) and parents every tool_result on the entry that holds ITS
+    # tool_use. With two or more calls in one API message the transcript
+    # forks: the conversation goes on from the result written last, and a
+    # single-path walk keeps only that branch. When that result answers an
+    # earlier call, the tool_use entries written after it are off the path
+    # too, results and all (Python #1422).
     #
-    # For each assistant entry on the chain, take its user children that are
-    # not on the chain and carry a tool_result for a tool_use on the chain,
-    # and insert them — in file order — before the next user entry of the
-    # chain (the batch's own on-chain result), or at the end when the chain
-    # has none. The anchor, not the raw file position, decides the place: a
-    # result that arrived after the conversation had already moved on to a
-    # further tool_use of the same message still lands with its batch, so
-    # every result follows the assistant turn that asked for it.
+    # So first the off-chain entries of every API message on the chain go
+    # back in, right after that message's last entry on the chain
+    # (insert_parallel_siblings). Then, for each assistant entry, the results
+    # off the chain that answer one of its calls are inserted — in file order
+    # — before the next user entry of the chain (the batch's own on-chain
+    # result), or at the end when the chain has none. The anchor, not the raw
+    # file position, decides the place: a result that arrived after the
+    # conversation had already moved on to a further tool_use of the same
+    # message still lands with its batch, so every result follows the
+    # assistant turn that asked for it.
     #
-    # The tool_use_id match is what keeps other user siblings out: a prompt
+    # The tool_use_id match is what keeps other user entries out: a prompt
     # abandoned by a rewind is a second child of a chain entry too, and
     # starts a branch that was dropped — and so is the old result of a call
     # the conversation was rewound to and answered again: the chain's own
@@ -2067,6 +2071,7 @@ module ClaudeAgentSDK
     # rejects sidechain / meta / team entries (main transcripts; a subagent
     # transcript is sidechain throughout).
     def reattach_parallel_tool_results(chain, entries, skip_flagged:)
+      chain = insert_parallel_siblings(chain, entries, skip_flagged)
       off_chain = off_chain_tool_results(chain, entries, skip_flagged)
       return chain if off_chain.empty?
 
@@ -2083,29 +2088,79 @@ module ClaudeAgentSDK
       placed.concat(pending.sort_by(&:first).map(&:last))
     end
 
-    # { uuid of an assistant entry on the chain => [[file position, entry], ...] }
-    # for the off-chain user children reattach_parallel_tool_results places.
-    def off_chain_tool_results(chain, entries, skip_flagged) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity -- one filter per condition of the re-attachment rule
+    # The chain with the off-chain assistant entries of each API message on
+    # it inserted after that message's last entry on the chain, in timestamp
+    # order (file order on a tie, as Python's stable sort). Only a message
+    # the chain holds is completed: an earlier attempt at the same turn is a
+    # different API message and stays out.
+    def insert_parallel_siblings(chain, entries, skip_flagged)
+      recovered = off_chain_siblings(chain, entries, skip_flagged)
+      return chain if recovered.empty?
+
+      chain.flat_map do |entry|
+        siblings = recovered.fetch(entry['uuid'], {}).values
+        [entry, *siblings.sort_by { |timestamp, position, _| [timestamp, position] }.map(&:last)]
+      end
+    end
+
+    # { uuid of an API message's last entry on the chain => { uuid => [timestamp, file position, entry] } }
+    # for that message's entries off the chain.
+    def off_chain_siblings(chain, entries, skip_flagged)
+      anchors = {} # message.id => uuid of its last entry on the chain
+      chain.each do |entry|
+        message_id = assistant_message_id(entry)
+        anchors[message_id] = entry['uuid'] if message_id
+      end
+      return {} if anchors.empty?
+
+      on_chain = chain.to_set { |entry| entry['uuid'] }
+      recovered = {}
+      entries.each_with_index do |entry, position|
+        anchor = anchors[assistant_message_id(entry)]
+        next if anchor.nil? || on_chain.include?(entry['uuid']) || (skip_flagged && off_main_conversation?(entry))
+
+        # A store can hold a second copy of an entry (a retried mirror batch).
+        (recovered[anchor] ||= {})[entry['uuid']] ||= [entry['timestamp'].to_s, position, entry]
+      end
+      recovered
+    end
+
+    # { uuid of the assistant entry a result belongs to => [[file position, entry], ...] }
+    # for the off-chain results reattach_parallel_tool_results places. A
+    # result belongs to its parent when that is an assistant entry of the
+    # chain, else to the entry holding the call it answers, if the same agent
+    # wrote both: the CLI sometimes parents a result on a hook attachment
+    # (its sourceToolAssistantUUID still names the call).
+    def off_chain_tool_results(chain, entries, skip_flagged) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity -- one filter per condition of the re-attachment rule
       on_chain = Set.new
       assistants = Set.new
-      tool_use_ids = Set.new
+      owners = {} # tool_use id => the chain's assistant entry holding it (nil when two API messages claim it)
       answered = Set.new # tool_use ids the chain's own results answer
       chain.each do |entry|
         on_chain << entry['uuid']
         case entry['type']
         when 'assistant'
           assistants << entry['uuid']
-          tool_use_ids.merge(content_block_values(entry, 'tool_use', 'id'))
+          content_block_values(entry, 'tool_use', 'id').each do |id|
+            owner = owners.fetch(id, entry)
+            owners[id] = owner && assistant_message_id(owner) == assistant_message_id(entry) ? entry : nil
+          end
         when 'user' then answered.merge(content_block_values(entry, 'tool_result', 'tool_use_id'))
         end
       end
-      return {} if (tool_use_ids - answered).empty?
+      return {} if (owners.keys - answered.to_a).empty?
 
-      continued = continued_from(entries)
+      # An entry of the chain going on from a result (the next tool_use of
+      # its batch) is not a branch that went on. Nor is another result for a
+      # call of the chain (the CLI sometimes parents one under an earlier
+      # result's hook attachment) — unless something went on from it in turn.
+      batch = entries.filter_map do |entry|
+        entry['uuid'] if entry['type'] == 'user' && answers_chain_call?(entry, owners)
+      end
+      continued = continued_from(entries, except: on_chain, relay: batch.to_set)
       found = {}
       entries.each_with_index do |entry, position|
-        next unless entry['type'] == 'user' && assistants.include?(entry['parentUuid'])
-        next if on_chain.include?(entry['uuid'])
+        next unless entry['type'] == 'user' && !on_chain.include?(entry['uuid'])
         next if skip_flagged && off_main_conversation?(entry)
         # A result something went on from started a branch that a rewind
         # dropped (the conversation was rewound to the call and went on
@@ -2114,13 +2169,17 @@ module ClaudeAgentSDK
         next if continued.include?(entry['uuid'])
 
         ids = content_block_values(entry, 'tool_result', 'tool_use_id')
-        next if ids.empty? || !ids.all? { |id| tool_use_ids.include?(id) && !answered.include?(id) }
+        next if !answers_chain_call?(entry, owners) || ids.any? { |id| answered.include?(id) }
+
+        anchor = entry['parentUuid'] if assistants.include?(entry['parentUuid'])
+        anchor ||= (owner = owners[ids.first]) && same_writer?(entry, owner) && owner['uuid']
+        next unless anchor
 
         # Claimed: a later result for the same call is not added — nor a
         # second copy of this entry, which a store can hold (a retried mirror
         # batch overlaps the write it retries).
         answered.merge(ids)
-        (found[entry['parentUuid']] ||= []) << [position, entry]
+        (found[anchor] ||= []) << [position, entry]
       end
       found
     end
@@ -2128,21 +2187,64 @@ module ClaudeAgentSDK
     # uuids of the entries a user or assistant entry continues from: its
     # nearest user / assistant ancestor, reached through entries that are
     # neither (hook attachments, system entries) — so a hook attachment
-    # written after an entry does not count as going on from it.
-    def continued_from(entries)
+    # written after an entry does not count as going on from it. Meta
+    # entries count as neither: the CLI writes one under a result itself
+    # (the "[Image: ...]" note of a screenshot), so it does not go on from
+    # the result, and a branch that goes on through one is still found.
+    # Entries whose uuid is in +except+ are not counted as going on; those in
+    # +relay+ only once something goes on from them.
+    def continued_from(entries, except: Set.new, relay: Set.new)
+      parents = goes_on_from(entries, except)
+      continued = Set.new
+      pending = parents.keys.reject { |uuid| relay.include?(uuid) }
+      while (uuid = pending.pop)
+        from = parents[uuid]
+        pending << from if from && continued.add?(from) && relay.include?(from)
+      end
+      continued
+    end
+
+    # { uuid => uuid of the entry it goes on from } for the user and
+    # assistant entries not in +except+ (see continued_from).
+    def goes_on_from(entries, except)
       by_uuid = {}
       entries.each { |entry| by_uuid[entry['uuid']] = entry if entry['uuid'] }
-      continued = Set.new
-      entries.each do |entry|
-        next unless %w[user assistant].include?(entry['type'])
+      entries.each_with_object({}) do |entry, found|
+        next if !goes_on?(entry) || except.include?(entry['uuid'])
 
         seen = Set.new
         parent = by_uuid[entry['parentUuid']]
-        parent = by_uuid[parent['parentUuid']] while parent && !%w[user assistant].include?(parent['type']) &&
-                                                     seen.add?(parent['uuid'])
-        continued << parent['uuid'] if parent && %w[user assistant].include?(parent['type'])
+        parent = by_uuid[parent['parentUuid']] while parent && !goes_on?(parent) && seen.add?(parent['uuid'])
+        found[entry['uuid']] = parent['uuid'] if parent && goes_on?(parent)
       end
-      continued
+    end
+
+    # A user or assistant entry that is not a meta injection: what
+    # continued_from counts as going on.
+    def goes_on?(entry)
+      %w[user assistant].include?(entry['type']) && !entry['isMeta']
+    end
+
+    # Whether an entry carries tool_results, every one for a call +owners+
+    # (tool_use id => the chain's entry holding it) places.
+    def answers_chain_call?(entry, owners)
+      ids = content_block_values(entry, 'tool_result', 'tool_use_id')
+      !ids.empty? && ids.all? { |id| owners[id] }
+    end
+
+    # The API message.id of an assistant entry (nil for any other entry).
+    def assistant_message_id(entry)
+      return unless entry['type'] == 'assistant'
+
+      message = entry['message']
+      message_id = message['id'] if message.is_a?(Hash)
+      message_id if message_id.is_a?(String) && !message_id.empty?
+    end
+
+    # Whether two entries were written by the same agent (the main session,
+    # or one subagent).
+    def same_writer?(entry, other)
+      !entry['isSidechain'] == !other['isSidechain'] && entry['agentId'] == other['agentId']
     end
 
     # Values of +key+ over the +type+ content blocks of an entry's message
@@ -2208,7 +2310,10 @@ module ClaudeAgentSDK
                          :collect_agent_files, :parse_jsonl_entries, :utf8_transcript_text,
                          :build_conversation_chain, :walk_to_leaf, :walk_to_root,
                          :pick_leaf, :visible_ancestor?, :off_main_conversation?, :visible_message?,
-                         :reattach_parallel_tool_results, :off_chain_tool_results,
+                         :reattach_parallel_tool_results, :insert_parallel_siblings, :off_chain_siblings,
+                         :off_chain_tool_results,
+                         :continued_from, :goes_on_from, :goes_on?,
+                         :answers_chain_call?, :assistant_message_id, :same_writer?,
                          :content_block_values,
                          :filter_visible_messages, :build_session_info, :created_at_from_file, :user_entry_texts,
                          :each_line_past_head,

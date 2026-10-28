@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Syncs with Python SDK 0.2.174 (previously 0.2.162). Python #1331 and #1332 were already in 1.2.0, and `SandboxSettings#ignore_violations` already took the command-pattern Hash that Python #1380 fixed its type to; every other release in the range only bumps the CLI Python bundles.
+
+### Fixed
+- **`get_session_messages` and `get_subagent_messages` (disk and `session_store:`) no longer drop the tool calls of a parallel batch** (Python SDK #1422). The conversation goes on from the tool result written last. When that result answers an earlier call of the batch than the last one, the `tool_use` entries written after that call were off the path the readers walk, so 1.2.0's fix (#157) never saw them: the readers returned neither those calls nor their results. Of the parallel batches in one developer's local transcripts, about 7% have this shape. The readers now put back every entry of an API message on the conversation, right after its last entry there (in timestamp order), then the results as before. A result that the CLI parented on a hook attachment instead of its call's entry (its `sourceToolAssistantUUID` still names the call) is put back as well, when the same agent wrote both. The guards from #157 hold: the chain's own result wins, at most one result comes back per call, and the result of a branch a rewind dropped stays out. That last guard was also too wide on real transcripts, and missed results #157 meant to return: going on from a result no longer counts as a dropped branch when what goes on is a later call of the same batch, another result of the batch (the CLI sometimes parents one under an earlier result's hook attachment), or a meta entry (the `[Image: ...]` note the CLI writes under a screenshot result). A branch that goes on through a meta entry or through another result of the batch is still recognized. Affected sessions return more messages than before, so `offset:`/`limit:` pages over them shift. Python fixes the main-session readers only; here both readers are fixed.
+
 ### Changed
+- `docs/options.md`: `include_hook_events` does not turn off the `SessionStart` and `Setup` hook events, which the CLI sends whether or not it is set (Python SDK #1336).
 - `CLIInstaller::PINNED_CLI_VERSION` moves from 2.1.295 to **2.1.311**, following the CLI the Python SDK bundles. `CLIInstaller.install_pinned` installs it. See the [Claude Code changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
 
 ## [1.4.2] - 2026-10-27
