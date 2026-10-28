@@ -419,6 +419,46 @@ RSpec.describe 'session readers and parallel tool calls' do
       expect(transcript.labels(messages)).to eq(three_tool_order(%w[b c a]))
     end
 
+    # The CLI writes a meta note under the result of a screenshot tool. It
+    # does not go on from the result: the conversation goes on from the
+    # result written last, and the other results still come back.
+    it 'still pulls in a parallel result the CLI wrote a meta note under' do
+      transcript = main_transcript do |t|
+        t.prompt(:prompt, 'Take two screenshots')
+        t.assistant(:use_a, t.tool_use('toolu_a', 'screenshot', {}), parent: :prompt)
+        t.assistant(:use_b, t.tool_use('toolu_b', 'screenshot', {}), parent: :use_a)
+        t.tool_result(:result_a, 'toolu_a', 'image a', parent: :use_a)
+        t.attachment(:post_a, parent: :result_a)
+        t.meta(:note_a, '[Image: original 2560x1520, displayed at 2000x1188.]', parent: :post_a)
+        t.tool_result(:result_b, 'toolu_b', 'image b', parent: :use_b)
+        t.attachment(:post_b, parent: :result_b)
+        t.meta(:note_b, '[Image: original 2560x1520, displayed at 2000x1188.]', parent: :post_b)
+        t.assistant(:answer, t.text('Both taken.'), parent: :note_b, message: 'msg_02')
+      end
+      transcript.write(transcript_path(session_id))
+
+      messages = ClaudeAgentSDK.get_session_messages(session_id: session_id, directory: cwd)
+
+      expect(transcript.labels(messages)).to eq(%w[prompt use_a use_b result_a result_b answer])
+    end
+
+    it 'does not pull in the old result when the branch went on through a meta entry' do
+      transcript = main_transcript do |t|
+        t.prompt(:prompt, 'Read a.rb')
+        t.assistant(:use, t.tool_use('toolu_a'), parent: :prompt)
+        t.tool_result(:result_old, 'toolu_a', 'contents of a.rb', parent: :use)
+        t.meta(:note_old, 'A system reminder.', parent: :result_old)
+        t.assistant(:abandoned, t.text('a.rb defines Foo.'), parent: :note_old, message: 'msg_02')
+        t.prompt(:new_prompt, 'Never mind, summarize the README instead', parent: :use)
+        t.assistant(:answer, t.text('The README says hello.'), parent: :new_prompt, message: 'msg_03')
+      end
+      transcript.write(transcript_path(session_id))
+
+      messages = ClaudeAgentSDK.get_session_messages(session_id: session_id, directory: cwd)
+
+      expect(transcript.labels(messages)).to eq(%w[prompt use new_prompt answer])
+    end
+
     # The CLI sometimes parents a result on the PreToolUse attachment of its
     # call; sourceToolAssistantUUID still names the call's entry.
     it 'returns a result parented on a hook attachment with its call' do
@@ -437,6 +477,32 @@ RSpec.describe 'session readers and parallel tool calls' do
       messages = ClaudeAgentSDK.get_session_messages(session_id: session_id, directory: cwd)
 
       expect(transcript.labels(messages)).to eq(%w[prompt use_a use_b result_a result_b answer])
+    end
+
+    # The CLI sometimes parents a result under the hook attachment of an
+    # earlier result of the batch. That result going on from the earlier one
+    # does not make it the head of a dropped branch.
+    #
+    #   use_a ─ use_b ─ use_c ─ result_c ─ answer
+    #     └─ result_a ─ post_a ─ result_b
+    it 'returns both results when one is parented under the other' do
+      transcript = main_transcript do |t|
+        t.prompt(:prompt, 'Read a.rb, b.rb and c.rb')
+        t.assistant(:use_a, t.tool_use('toolu_a'), parent: :prompt)
+        t.assistant(:use_b, t.tool_use('toolu_b'), parent: :use_a)
+        t.assistant(:use_c, t.tool_use('toolu_c'), parent: :use_b)
+        t.tool_result(:result_a, 'toolu_a', 'contents of a.rb', parent: :use_a)
+        t.attachment(:post_a, parent: :result_a)
+        t.tool_result(:result_b, 'toolu_b', 'contents of b.rb', parent: :post_a,
+                                                                sourceToolAssistantUUID: t.id(:use_b))
+        t.tool_result(:result_c, 'toolu_c', 'contents of c.rb', parent: :use_c)
+        t.assistant(:answer, t.text('All three read.'), parent: :result_c, message: 'msg_02')
+      end
+      transcript.write(transcript_path(session_id))
+
+      messages = ClaudeAgentSDK.get_session_messages(session_id: session_id, directory: cwd)
+
+      expect(transcript.labels(messages)).to eq(three_tool_order(%w[a b c]))
     end
 
     # A retried turn: the first attempt is another API message, so it stays

@@ -2150,9 +2150,12 @@ module ClaudeAgentSDK
       end
       return {} if (owners.keys - answered.to_a).empty?
 
-      # An entry of the chain going on from a result (the next tool_use of
-      # its batch) is not a branch that went on.
-      continued = continued_from(entries, except: on_chain)
+      # Neither an entry of the chain going on from a result (the next
+      # tool_use of its batch) nor another result for a call of the chain
+      # (the CLI sometimes parents one under an earlier result's hook
+      # attachment) is a branch that went on.
+      batch = entries.select { |entry| entry['type'] == 'user' && answers_chain_call?(entry, owners) }
+      continued = continued_from(entries, except: on_chain | batch.map { |entry| entry['uuid'] })
       found = {}
       entries.each_with_index do |entry, position|
         next unless entry['type'] == 'user' && !on_chain.include?(entry['uuid'])
@@ -2164,7 +2167,7 @@ module ClaudeAgentSDK
         next if continued.include?(entry['uuid'])
 
         ids = content_block_values(entry, 'tool_result', 'tool_use_id')
-        next if ids.empty? || !ids.all? { |id| owners[id] && !answered.include?(id) }
+        next if !answers_chain_call?(entry, owners) || ids.any? { |id| answered.include?(id) }
 
         anchor = entry['parentUuid'] if assistants.include?(entry['parentUuid'])
         anchor ||= (owner = owners[ids.first]) && same_writer?(entry, owner) && owner['uuid']
@@ -2182,23 +2185,37 @@ module ClaudeAgentSDK
     # uuids of the entries a user or assistant entry continues from: its
     # nearest user / assistant ancestor, reached through entries that are
     # neither (hook attachments, system entries) — so a hook attachment
-    # written after an entry does not count as going on from it. Entries
-    # whose uuid is in +except+ are not counted as going on.
+    # written after an entry does not count as going on from it. Meta
+    # entries count as neither: the CLI writes one under a result itself
+    # (the "[Image: ...]" note of a screenshot), so it does not go on from
+    # the result, and a branch that goes on through one is still found.
+    # Entries whose uuid is in +except+ are not counted as going on.
     def continued_from(entries, except: Set.new)
       by_uuid = {}
       entries.each { |entry| by_uuid[entry['uuid']] = entry if entry['uuid'] }
       continued = Set.new
       entries.each do |entry|
-        next unless %w[user assistant].include?(entry['type'])
-        next if except.include?(entry['uuid'])
+        next if !goes_on?(entry) || except.include?(entry['uuid'])
 
         seen = Set.new
         parent = by_uuid[entry['parentUuid']]
-        parent = by_uuid[parent['parentUuid']] while parent && !%w[user assistant].include?(parent['type']) &&
-                                                     seen.add?(parent['uuid'])
-        continued << parent['uuid'] if parent && %w[user assistant].include?(parent['type'])
+        parent = by_uuid[parent['parentUuid']] while parent && !goes_on?(parent) && seen.add?(parent['uuid'])
+        continued << parent['uuid'] if parent && goes_on?(parent)
       end
       continued
+    end
+
+    # A user or assistant entry that is not a meta injection: what
+    # continued_from counts as going on.
+    def goes_on?(entry)
+      %w[user assistant].include?(entry['type']) && !entry['isMeta']
+    end
+
+    # Whether an entry carries tool_results, every one for a call +owners+
+    # (tool_use id => the chain's entry holding it) places.
+    def answers_chain_call?(entry, owners)
+      ids = content_block_values(entry, 'tool_result', 'tool_use_id')
+      !ids.empty? && ids.all? { |id| owners[id] }
     end
 
     # The API message.id of an assistant entry (nil for any other entry).
@@ -2281,7 +2298,7 @@ module ClaudeAgentSDK
                          :pick_leaf, :visible_ancestor?, :off_main_conversation?, :visible_message?,
                          :reattach_parallel_tool_results, :insert_parallel_siblings, :off_chain_siblings,
                          :off_chain_tool_results,
-                         :continued_from, :assistant_message_id, :same_writer?,
+                         :continued_from, :goes_on?, :answers_chain_call?, :assistant_message_id, :same_writer?,
                          :content_block_values,
                          :filter_visible_messages, :build_session_info, :created_at_from_file, :user_entry_texts,
                          :each_line_past_head,
