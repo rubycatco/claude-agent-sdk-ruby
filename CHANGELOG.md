@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `CLIInstaller::PINNED_CLI_VERSION` moves from 2.1.311 to **2.1.312**, following the CLI the Python SDK bundles. `CLIInstaller.install_pinned` installs it. See the [Claude Code changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
 ## [1.4.3] - 2026-10-28
 
 Syncs with Python SDK 0.2.174 (previously 0.2.162). Python #1331 and #1332 were already in 1.2.0, and `SandboxSettings#ignore_violations` already took the command-pattern Hash that Python #1380 fixed its type to; every other release in the range only bumps the CLI Python bundles.
