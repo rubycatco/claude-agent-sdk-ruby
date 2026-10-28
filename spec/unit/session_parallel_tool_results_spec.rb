@@ -505,6 +505,31 @@ RSpec.describe 'session readers and parallel tool calls' do
       expect(transcript.labels(messages)).to eq(three_tool_order(%w[a b c]))
     end
 
+    # The same shape on a branch a rewind dropped: the branch went on from
+    # result_b, so result_a, which result_b went on from, heads it too.
+    #
+    #   use_a ─ use_b ─ new_prompt ─ answer
+    #     └─ result_a ─ post_a ─ result_b ─ abandoned
+    it 'does not pull in the results of a dropped branch when one is parented under the other' do
+      transcript = main_transcript do |t|
+        t.prompt(:prompt, 'Read a.rb and b.rb')
+        t.assistant(:use_a, t.tool_use('toolu_a'), parent: :prompt)
+        t.assistant(:use_b, t.tool_use('toolu_b'), parent: :use_a)
+        t.tool_result(:result_a, 'toolu_a', 'contents of a.rb', parent: :use_a)
+        t.attachment(:post_a, parent: :result_a)
+        t.tool_result(:result_b, 'toolu_b', 'contents of b.rb', parent: :post_a,
+                                                                sourceToolAssistantUUID: t.id(:use_b))
+        t.assistant(:abandoned, t.text('Both files read.'), parent: :result_b, message: 'msg_02')
+        t.prompt(:new_prompt, 'Never mind, summarize the README instead', parent: :use_b)
+        t.assistant(:answer, t.text('The README says hello.'), parent: :new_prompt, message: 'msg_03')
+      end
+      transcript.write(transcript_path(session_id))
+
+      messages = ClaudeAgentSDK.get_session_messages(session_id: session_id, directory: cwd)
+
+      expect(transcript.labels(messages)).to eq(%w[prompt use_a use_b new_prompt answer])
+    end
+
     # A retried turn: the first attempt is another API message, so it stays
     # out even though it hangs off the same prompt.
     it 'does not put back an earlier attempt at the same turn' do

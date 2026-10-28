@@ -2150,12 +2150,14 @@ module ClaudeAgentSDK
       end
       return {} if (owners.keys - answered.to_a).empty?
 
-      # Neither an entry of the chain going on from a result (the next
-      # tool_use of its batch) nor another result for a call of the chain
-      # (the CLI sometimes parents one under an earlier result's hook
-      # attachment) is a branch that went on.
-      batch = entries.select { |entry| entry['type'] == 'user' && answers_chain_call?(entry, owners) }
-      continued = continued_from(entries, except: on_chain | batch.map { |entry| entry['uuid'] })
+      # An entry of the chain going on from a result (the next tool_use of
+      # its batch) is not a branch that went on. Nor is another result for a
+      # call of the chain (the CLI sometimes parents one under an earlier
+      # result's hook attachment) — unless something went on from it in turn.
+      batch = entries.filter_map do |entry|
+        entry['uuid'] if entry['type'] == 'user' && answers_chain_call?(entry, owners)
+      end
+      continued = continued_from(entries, except: on_chain, relay: batch.to_set)
       found = {}
       entries.each_with_index do |entry, position|
         next unless entry['type'] == 'user' && !on_chain.include?(entry['uuid'])
@@ -2189,20 +2191,32 @@ module ClaudeAgentSDK
     # entries count as neither: the CLI writes one under a result itself
     # (the "[Image: ...]" note of a screenshot), so it does not go on from
     # the result, and a branch that goes on through one is still found.
-    # Entries whose uuid is in +except+ are not counted as going on.
-    def continued_from(entries, except: Set.new)
+    # Entries whose uuid is in +except+ are not counted as going on; those in
+    # +relay+ only once something goes on from them.
+    def continued_from(entries, except: Set.new, relay: Set.new)
+      parents = goes_on_from(entries, except)
+      continued = Set.new
+      pending = parents.keys.reject { |uuid| relay.include?(uuid) }
+      while (uuid = pending.pop)
+        from = parents[uuid]
+        pending << from if from && continued.add?(from) && relay.include?(from)
+      end
+      continued
+    end
+
+    # { uuid => uuid of the entry it goes on from } for the user and
+    # assistant entries not in +except+ (see continued_from).
+    def goes_on_from(entries, except)
       by_uuid = {}
       entries.each { |entry| by_uuid[entry['uuid']] = entry if entry['uuid'] }
-      continued = Set.new
-      entries.each do |entry|
+      entries.each_with_object({}) do |entry, found|
         next if !goes_on?(entry) || except.include?(entry['uuid'])
 
         seen = Set.new
         parent = by_uuid[entry['parentUuid']]
         parent = by_uuid[parent['parentUuid']] while parent && !goes_on?(parent) && seen.add?(parent['uuid'])
-        continued << parent['uuid'] if parent && goes_on?(parent)
+        found[entry['uuid']] = parent['uuid'] if parent && goes_on?(parent)
       end
-      continued
     end
 
     # A user or assistant entry that is not a meta injection: what
@@ -2298,7 +2312,8 @@ module ClaudeAgentSDK
                          :pick_leaf, :visible_ancestor?, :off_main_conversation?, :visible_message?,
                          :reattach_parallel_tool_results, :insert_parallel_siblings, :off_chain_siblings,
                          :off_chain_tool_results,
-                         :continued_from, :goes_on?, :answers_chain_call?, :assistant_message_id, :same_writer?,
+                         :continued_from, :goes_on_from, :goes_on?,
+                         :answers_chain_call?, :assistant_message_id, :same_writer?,
                          :content_block_values,
                          :filter_visible_messages, :build_session_info, :created_at_from_file, :user_entry_texts,
                          :each_line_past_head,
