@@ -40,6 +40,16 @@ RSpec.describe 'require surface' do
     expect(status.exitstatus).to eq(0), "a non-Rails require must load neither Rails nor the Railtie: #{err}"
   end
 
+  it 'loads the cassette only on request, and the cassette entry point loads the SDK core' do
+    plain = "require 'claude_agent_sdk'; exit(defined?(ClaudeAgentSDK::Testing::Cassette) ? 1 : 0)"
+    _out, err, status = run_ruby(plain)
+    expect(status.exitstatus).to eq(0), "a plain require must not define Testing::Cassette: #{err}"
+
+    code = "require 'claude_agent_sdk/testing/cassette'; exit(ClaudeAgentSDK.respond_to?(:query) ? 0 : 1)"
+    _out, err, status = run_ruby(code)
+    expect(status.exitstatus).to eq(0), "the cassette entry point must load the SDK core: #{err}"
+  end
+
   it 'lets the configuration file be required on its own' do
     # default_options= deep-copies through Type.deep_dup_for_options; a
     # standalone require of configuration.rb must bring that in itself.
