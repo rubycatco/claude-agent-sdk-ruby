@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`ClaudeAgentSDK::Testing::Cassette`** (`require 'claude_agent_sdk/testing/cassette'`) records a session's stream-JSON frames to a JSONL file and replays them in tests without the CLI. The replay plays the CLI's side, so hooks, `can_use_tool` and SDK MCP tools run for real and what they return is compared with the recording; a mismatch raises `Cassette::MismatchError` from `query` / `ask` / `Client`. Works with `query(transport:)` and `Client` (`**cassette.client_args`); warns when the options or the pinned CLI changed since recording. See [docs/testing.md](docs/testing.md).
+
 ### Changed
 - `CLIInstaller::PINNED_CLI_VERSION` moves from 2.1.311 to **2.1.314**, following the CLI the Python SDK bundles. `CLIInstaller.install_pinned` installs it. See the [Claude Code changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
 
