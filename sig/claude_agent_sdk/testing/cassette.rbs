@@ -1,0 +1,72 @@
+module ClaudeAgentSDK
+  module Testing
+    # Records sessions' stream-JSON frames to a JSONL file and replays them
+    # without the CLI (`require 'claude_agent_sdk/testing/cassette'`).
+    class Cassette
+      class Error < ClaudeSDKError
+      end
+
+      # The SDK did something the cassette did not record.
+      class MismatchError < Error
+      end
+
+      FORMAT_VERSION: Integer
+
+      MODES: Array[Symbol]
+
+      MATCH_MODES: Array[Symbol]
+
+      VOLATILE_KEYS: Array[Symbol]
+
+      type mode = :once | :record | :replay
+
+      # A Proc, Method or any object with #call.
+      interface _Matcher
+        def call: (wire_hash recorded, wire_hash written) -> boolish
+      end
+
+      type match = :strict | :type | _Matcher
+
+      attr_reader path: String
+
+      # :record or :replay once resolved.
+      attr_reader mode: (:record | :replay)
+
+      attr_reader match: match
+
+      attr_reader ignore: Array[Symbol]
+
+      attr_reader wait: Numeric
+
+      def initialize: (String | Pathname path, ?mode: mode, ?match: match, ?ignore: Array[String | Symbol],
+                       ?wait: Numeric, ?transport_class: _TransportClass, ?transport_args: Hash[Symbol, untyped]) -> void
+
+      def recording?: () -> bool
+
+      def replaying?: () -> bool
+
+      # A transport for query(transport:) / ask(transport:).
+      def transport: (?ClaudeAgentOptions? options) -> Transport
+
+      # Keyword arguments for Client.new / Client.open.
+      def client_args: () -> { transport_class: _TransportClass, transport_args: { cassette: Cassette } }
+
+      # Raises MismatchError on any mismatch or unreplayed event; Error for a
+      # recording that was not saved.
+      def verify!: () -> nil
+
+      # Digest of the CLI arguments options produce, or nil.
+      def self.fingerprint: (ClaudeAgentOptions options) -> String?
+
+      # Wraps a real transport and records every frame.
+      class RecordingTransport < Transport
+        def initialize: (ClaudeAgentOptions options, cassette: Cassette) -> void
+      end
+
+      # Plays the CLI's side of one recorded connection.
+      class ReplayTransport < Transport
+        def initialize: (ClaudeAgentOptions options, cassette: Cassette) -> void
+      end
+    end
+  end
+end

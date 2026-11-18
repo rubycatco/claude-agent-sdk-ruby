@@ -231,6 +231,7 @@ The block runs on a plain thread, so ActiveRecord calls inside it are safe. It i
 | Vendoring a pinned CLI binary and CLI discovery order | [docs/cli-installer.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/cli-installer.md) |
 | Hash-key rule, attribute access, and the message, content block, and configuration type reference | [docs/types.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/types.md) |
 | Error handling, exception hierarchy, timeouts | [docs/errors.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/errors.md) |
+| Recording sessions and replaying them in tests without the CLI | [docs/testing.md](https://github.com/rubycatco/claude-agent-sdk-ruby/blob/main/docs/testing.md) |
 
 API reference: [rubydoc.info/gems/claude-agent-sdk](https://rubydoc.info/gems/claude-agent-sdk). Available built-in tools: [Claude Code tools reference](https://code.claude.com/docs/en/tools-reference).
 
